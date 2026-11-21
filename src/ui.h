@@ -306,7 +306,8 @@ public:
         STYLE_INFO          = 6,
         PASTE_TRANSFORMED   = 7,
         EDIT_VIEW           = 8,
-        TANGENT_ARC         = 9
+        TANGENT_ARC         = 9,
+        CHAT                = 10
     };
     typedef struct {
         Screen  screen;
@@ -389,7 +390,9 @@ public:
         // For named parameters
         PARAM_NAME            = 810,
         PARAM_VALUE           = 811,
-        LINK_PARAM_VALUE      = 812
+        LINK_PARAM_VALUE      = 812,
+        // For the chat with Claude
+        CHAT_MESSAGE          = 900
     };
     struct {
         bool        showAgain;
@@ -435,6 +438,12 @@ public:
     void ShowPasteTransformed();
     void ShowEditView();
     void ShowTangentArc();
+    void ShowChat();
+    // Opens the chat's message editor at the next ShowChat() (when entering
+    // the screen, or after the user clicks the input line).
+    bool chatOpenEditor = false;
+    // Where ShowChat() put the input line, or -1 if it didn't.
+    int chatInputHalfRow = -1;
     // Special screen, based on selection
     void DescribeSelection();
 
@@ -527,6 +536,8 @@ public:
     static void ScreenPasteTransformed(int link, uint32_t v);
 
     static void ScreenHome(int link, uint32_t v);
+    static void ScreenShowChat(int link, uint32_t v);
+    static void ScreenChatAction(int link, uint32_t v);
 
     // These ones do stuff with the edit control
     static void ScreenChangeExprA(int link, uint32_t v);

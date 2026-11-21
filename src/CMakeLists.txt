@@ -148,6 +148,7 @@ if(ENABLE_GUI OR ENABLE_CLI)
         request.cpp
         style.cpp
         textscreens.cpp
+        chatscreen.cpp
         textwin.cpp
         toolbar.cpp
         ttf.cpp
@@ -284,6 +285,7 @@ if(ENABLE_GUI)
             mcp/tools_ops.cpp
             mcp/tools_view.cpp
             mcp/tools_analysis.cpp
+            mcp/chat.cpp
             render/rendercairo.cpp)
         target_include_directories(solvespace SYSTEM PRIVATE
             ${CMAKE_SOURCE_DIR}/extlib)

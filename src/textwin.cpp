@@ -293,6 +293,8 @@ void TextWindow::ClearSuper() {
     // Ugly hack, but not so ugly as the next line
     Platform::WindowRef oldWindow = std::move(window);
     std::shared_ptr<ViewportCanvas> oldCanvas = std::move(canvas);
+    // Stay in the chat (e.g. when the user undoes what Claude did).
+    bool inChat = (shown.screen == Screen::CHAT);
 
     // Cannot use *this = {} here because TextWindow instances
     // are 2.4MB long; this causes stack overflows in prologue
@@ -303,6 +305,7 @@ void TextWindow::ClearSuper() {
     // Return old canvas
     window = std::move(oldWindow);
     canvas = std::move(oldCanvas);
+    if(inChat) shown.screen = Screen::CHAT;
 
     HideEditControl();
 
@@ -571,6 +574,10 @@ void TextWindow::Show() {
     SS.GW.GroupSelection();
     auto const &gs = SS.GW.gs;
 
+    // The chat follows its newest text if it was scrolled to the bottom.
+    bool wasAtBottom = (rows > 0 && scrollPos >= top[rows-1] + 2 - halfRows - 1);
+    chatInputHalfRow = -1;
+
     // Make sure these tests agree with test used to draw indicator line on
     // main list of groups screen.
     if(SS.GW.pending.description) {
@@ -583,8 +590,11 @@ void TextWindow::Show() {
         Printf(true, "%Fl%f%Ll(cancel operation)%E",
             &TextWindow::ScreenUnselectAll);
     } else if((gs.n > 0 || gs.constraints > 0) &&
-                                    shown.screen != Screen::PASTE_TRANSFORMED)
+                                    shown.screen != Screen::PASTE_TRANSFORMED &&
+                                    shown.screen != Screen::CHAT)
     {
+        // (The chat isn't replaced by the selection: Claude selects things
+        // through MCP while the user is reading its reply.)
         if(edit.meaning != Edit::TTF_TEXT) HideEditControl();
         ShowHeader(false);
         DescribeSelection();
@@ -605,6 +615,7 @@ void TextWindow::Show() {
             case Screen::PASTE_TRANSFORMED:  ShowPasteTransformed(); break;
             case Screen::EDIT_VIEW:          ShowEditView();         break;
             case Screen::TANGENT_ARC:        ShowTangentArc();       break;
+            case Screen::CHAT:               ShowChat();             break;
         }
     }
     Printf(false, "");
@@ -619,7 +630,22 @@ void TextWindow::Show() {
         }
     }
 
+    bool chatShown = (chatInputHalfRow >= 0 || shown.screen == Screen::CHAT) &&
+                     !SS.GW.pending.description;
+    if(chatShown && window && !window->IsEditorVisible() &&
+       (wasAtBottom || chatOpenEditor)) {
+        scrollPos = top[rows-1] + 2;    // clamped to the bottom by Resize()
+    }
+
     if(window) Resize();
+
+    if(chatOpenEditor && chatShown && window) {
+        chatOpenEditor = false;
+        if(chatInputHalfRow >= 0) {
+            edit.meaning = Edit::CHAT_MESSAGE;
+            ShowEditControl(4, "", chatInputHalfRow);
+        }
+    }
 }
 
 void TextWindow::Resize()

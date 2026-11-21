@@ -68,6 +68,15 @@ bool StartServer(uint16_t port);
 // On the GUI thread, and not from inside a tool call.
 void StopServer();
 
+// The port the server is listening on, or 0 if it isn't running; and the
+// token clients must send (empty: none). On the GUI thread.
+uint16_t RunningPort();
+std::string CurrentToken();
+
+// The chat with Claude in the text window (chat.cpp): installs the hooks in
+// SS.chat. On the GUI thread, after SS.Init().
+void SetupChat();
+
 // Determines the port to use from the command line (--mcp or --mcp=PORT,
 // which are removed from args) and the SOLVESPACE_MCP_PORT environment
 // variable. Returns 0 if MCP was not requested.

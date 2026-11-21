@@ -658,6 +658,38 @@ public:
         std::function<void()>       shutdown;
     }        mcp;
 
+    // A chat with Claude (the Claude Code CLI, run as a child process and
+    // connected to the MCP server), shown in the text window's chat screen.
+    // The transcript lives here, so it survives leaving the screen; the
+    // hooks are installed by the chat backend when SolveSpace is built with
+    // the MCP server, and are empty otherwise.
+    struct ChatEntry {
+        enum class Kind : uint32_t {
+            USER,       // what the user typed
+            CLAUDE,     // Claude's reply text (grows while streaming)
+            TOOL,       // a tool call Claude made
+            NOTE,       // status, e.g. "session started"
+            FAILURE     // an error from Claude or the process
+        };
+        Kind        kind;
+        std::string text;
+    };
+    struct {
+        std::vector<ChatEntry> entries;
+        bool        running;        // the claude process is running
+        bool        busy;           // a reply is in progress
+        std::string status;         // e.g. "claude-opus-5-5, solvespace connected"
+
+        // Sends a message, starting Claude (and the MCP server) if needed.
+        std::function<void(const std::string &)> send;
+        // Stops the reply in progress.
+        std::function<void()>       interrupt;
+        // Ends the session and clears the transcript.
+        std::function<void()>       reset;
+        // Ends the session; called on exit.
+        std::function<void()>       shutdown;
+    }        chat;
+
     std::string MmToString(double v, bool editable=false);
     std::string MmToStringSI(double v, int dim = 0);
     std::string DegreeToString(double v);

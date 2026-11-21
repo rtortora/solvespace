@@ -337,6 +337,7 @@ void SolveSpaceUI::Exit() {
 
     // On macOS, ExitGui() doesn't return, so stop the MCP server's threads
     // now rather than after the main loop.
+    if(chat.shutdown) chat.shutdown();
     if(mcp.shutdown) mcp.shutdown();
 
     Platform::ExitGui();

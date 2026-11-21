@@ -29,7 +29,11 @@ void TextWindow::ShowHeader(bool withNav) {
     }
 
     // Navigation buttons
-    if(withNav) {
+    if(withNav && SS.chat.send) {
+        Printf(false, " %Fl%Lc%fchat%E  %Fl%Lh%fhome%E   %Ft%s%E%s",
+            (&TextWindow::ScreenShowChat), (&TextWindow::ScreenHome),
+            header, desc.c_str());
+    } else if(withNav) {
         Printf(false, " %Fl%Lh%fhome%E   %Ft%s%E%s",
             (&TextWindow::ScreenHome), header, desc.c_str());
     } else {
@@ -1310,6 +1314,12 @@ void TextWindow::EditControlDone(std::string s) {
 
         case Edit::STEP_DIM_STEPS:
             stepDim.steps = min(300, max(1, atoi(s.c_str())));
+            break;
+
+        case Edit::CHAT_MESSAGE:
+            if(SS.chat.send && !s.empty()) {
+                SS.chat.send(s);
+            }
             break;
 
         case Edit::TANGENT_ARC_RADIUS:

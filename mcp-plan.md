@@ -307,11 +307,72 @@ src/solvespace.{h,cpp}          SS.mcp settings and hooks, FreezeMcpSettings,
                                 shutdown hook in Exit()
 src/confscreen.cpp, src/ui.h    MCP section of the configuration screen
 src/platform/gui*.{cpp,mm}      Platform::SetClipboardText (all backends)
+src/mcp/chat.cpp                the in-app chat's backend (runs `claude`, see §1.7)
+src/chatscreen.cpp, src/ui.h    the text window's chat screen (Screen::CHAT)
 CMakeLists.txt, src/CMakeLists  ENABLE_MCP option; GUI target only (not Qt or
                                 Emscripten); adds render/rendercairo.cpp for
                                 screenshots
 test/mcp/                       mcp_client.py, mcp_smoke.py, mcp_tests.py
 ```
+
+### 1.7 In-app chat with Claude
+
+The text window's header has a **chat** link left of **home**. It opens
+`Screen::CHAT`, a conversation with the Claude Code CLI that pilots the
+running SolveSpace through its own MCP server.
+
+* **Backend (`src/mcp/chat.cpp`, GUI target only).** The first message
+  starts `claude -p --input-format stream-json --output-format stream-json
+  --verbose --include-partial-messages` in its own process group, with
+  `--strict-mcp-config --mcp-config <temp file>` (0600, holds the token,
+  deleted once Claude's `system/init` arrives), `--tools ""` (no shell or
+  file tools), `--allowedTools mcp__solvespace`, `--permission-mode dontAsk`
+  and an appended system prompt about the narrow panel. The working
+  directory is the open file's folder, else `$HOME` (Claude keeps its session
+  history per directory). If the MCP server is off, it is started for the
+  chat on `SS.mcp.port` (or one of the next 9 ports) without changing the
+  saved setting.
+* **Finding `claude`.** GUI apps on macOS get a minimal PATH, so the user's
+  shell is asked for its PATH once (`$SHELL -ilc`), plus `~/.local/bin`,
+  `~/.claude/local`, `/opt/homebrew/bin`, `/usr/local/bin`.
+  `SOLVESPACE_CLAUDE` overrides the path. `CLAUDECODE` is removed from the
+  child's environment.
+* **Threads.** A launcher thread resolves PATH, forks (closing every fd
+  above 2, so the MCP sockets aren't inherited) and reads stdout; another
+  reads stderr. Lines go into a queue; a 30 ms GUI timer folds them into
+  `SS.chat.entries` (user / Claude / tool / note / failure). Text arrives as
+  `content_block_delta`s; tool calls come from `assistant` messages (a
+  `batch` shows its inner tools); failed tool results and the `result`
+  (time, cost or error) are shown too.
+* **Session lifetime.** The process and transcript belong to `SS.chat`, not
+  the screen, so they survive navigating away. **stop** sends a
+  `control_request` interrupt; **new chat** ends the process (stdin closed,
+  SIGTERM to the group, SIGKILL after 3 s) and clears the transcript.
+  `SS.Exit` ends it too.
+* **Screen behaviour.** The chat isn't replaced by the selection
+  description (Claude selects things through MCP). A tool call that starts
+  in the chat, and `TW.ClearSuper()` (undo, new file), stay in the chat.
+  The screen follows new text when scrolled to the bottom, wraps to the
+  window width, and shows only the newest ~3960 lines (the text window's row
+  limit). Input uses the text window's single-line edit control on the `>`
+  row; it opens on entering the chat and when the row is clicked. Typing is
+  disabled while Claude replies, because the edit control can't move with
+  the text and blocks scrolling while open.
+* **Not done:** Windows (the backend reports "not available"; it needs
+  `CreateProcess` with pipes); multi-line input; Markdown rendering;
+  approving tools other than SolveSpace's.
+* **Possible follow-up: typing while Claude replies.** The CLI queues a
+  message sent mid-reply and answers it afterwards (checked). Needed:
+  (1) put the `>` input between the history and the current exchange, so
+  streamed text grows away from it and it only moves on Enter (then reopen
+  it at the new row); (2) make `SS.chat.busy` a count of replies still to
+  come; (3) keep the status to one line, so the rows above the input don't
+  shift; (4) don't close the chat's edit box in `DeleteTaggedRequests` and
+  `TW.ClearSuper()`, which MCP `delete`, `undo`, `new_document` and
+  `open_file` reach. Remaining limit: the text window can't scroll while
+  the edit box is open, so a long reply is cut off until the box is closed,
+  which discards the draft. Fixing that needs a per-platform "get editor
+  text" so the box can be moved without losing it.
 
 ---
 

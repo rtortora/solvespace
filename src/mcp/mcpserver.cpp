@@ -163,6 +163,11 @@ static CallOutcome CallToolOnGuiThread(const Tool *tool, const json &args) {
     activeMessageCapture = &capture;
 
     CallOutcome out;
+    // The GUI code the tools drive moves the text window to other screens
+    // (a new group's, for example); if the user is chatting with Claude,
+    // stay in the chat.
+    bool inChat = (SS.TW.shown.screen == TextWindow::Screen::CHAT);
+
     // If the user is half-way through drawing something, abandon it; the
     // pending operation would otherwise interfere with the tool.
     using Pending = GraphicsWindow::Pending;
@@ -192,6 +197,7 @@ static CallOutcome CallToolOnGuiThread(const Tool *tool, const json &args) {
     }
     activeMessageCapture = NULL;
 
+    if(inChat) SS.TW.GoToScreen(TextWindow::Screen::CHAT);
     SS.GW.Invalidate();
     SS.ScheduleShowTW();
 
@@ -570,6 +576,14 @@ static std::string ConnectCommand() {
     return cmd;
 }
 
+uint16_t RunningPort() {
+    return httpServer ? runningPort : 0;
+}
+
+std::string CurrentToken() {
+    return EffectiveToken();
+}
+
 // After the user changed "enabled" or the port in the configuration screen.
 static void ApplyServerSettings() {
     overridePort = 0;
@@ -599,6 +613,7 @@ void Setup(uint16_t portFromArgs) {
     SS.mcp.status         = Status;
     SS.mcp.connectCommand = ConnectCommand;
     SS.mcp.shutdown       = StopServer;
+    SetupChat();
 
     if(overridePort != 0) {
         StartServer(overridePort);
