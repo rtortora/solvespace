@@ -9,9 +9,17 @@ class ToolFailed(Exception):
 
 
 class Client:
-    def __init__(self, url="http://127.0.0.1:47474/mcp"):
+    def __init__(self, url="http://127.0.0.1:47474/mcp", token=None):
         self.url = url
+        self.token = token
         self.next_id = 0
+
+    def headers(self):
+        h = {"Content-Type": "application/json",
+             "Accept": "application/json, text/event-stream"}
+        if self.token:
+            h["Authorization"] = f"Bearer {self.token}"
+        return h
 
     def rpc(self, method, params=None, notify=False):
         msg = {"jsonrpc": "2.0", "method": method}
@@ -21,9 +29,7 @@ class Client:
             self.next_id += 1
             msg["id"] = self.next_id
         req = urllib.request.Request(
-            self.url, data=json.dumps(msg).encode(),
-            headers={"Content-Type": "application/json",
-                     "Accept": "application/json, text/event-stream"})
+            self.url, data=json.dumps(msg).encode(), headers=self.headers())
         with urllib.request.urlopen(req, timeout=60) as resp:
             body = resp.read()
             if notify:

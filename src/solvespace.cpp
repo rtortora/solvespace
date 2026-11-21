@@ -67,6 +67,11 @@ void SolveSpaceUI::Init() {
     useSIPrefixes = settings->ThawBool("UseSIPrefixes", false);
     // Camera tangent (determines perspective)
     cameraTangent = settings->ThawFloat("CameraTangent", 0.3f/1e3);
+    // MCP server
+    mcp.enabled = settings->ThawBool("McpEnabled", false);
+    mcp.port    = (int)settings->ThawInt("McpPort", 47474);
+    if(mcp.port < 1 || mcp.port > 65535) mcp.port = 47474;
+    mcp.token   = settings->ThawString("McpToken", "");
     // Grid spacing
     gridSpacing = settings->ThawFloat("GridSpacing", 5.0);
     // Export scale factor
@@ -269,6 +274,8 @@ void SolveSpaceUI::Exit() {
     settings->FreezeBool("UseSIPrefixes", useSIPrefixes);
     // Camera tangent (determines perspective)
     settings->FreezeFloat("CameraTangent", (float)cameraTangent);
+    // MCP server
+    FreezeMcpSettings();
     // Grid spacing
     settings->FreezeFloat("GridSpacing", gridSpacing);
     // Export scale
@@ -328,7 +335,18 @@ void SolveSpaceUI::Exit() {
     // And the default styles, colors and line widths and such.
     Style::FreezeDefaultStyles(settings);
 
+    // On macOS, ExitGui() doesn't return, so stop the MCP server's threads
+    // now rather than after the main loop.
+    if(mcp.shutdown) mcp.shutdown();
+
     Platform::ExitGui();
+}
+
+void SolveSpaceUI::FreezeMcpSettings() {
+    Platform::SettingsRef settings = Platform::GetSettings();
+    settings->FreezeBool("McpEnabled", mcp.enabled);
+    settings->FreezeInt("McpPort", (uint32_t)mcp.port);
+    settings->FreezeString("McpToken", mcp.token);
 }
 
 void SolveSpaceUI::Refresh() {

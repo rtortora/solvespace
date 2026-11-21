@@ -12,6 +12,7 @@
 #include "guiqt.h"
 
 #include <QApplication>
+#include <QClipboard>
 #include <QAction>
 #include <QActionGroup>
 #include <QDesktopServices>
@@ -1081,6 +1082,10 @@ std::vector<Platform::Path> GetFontFiles() {
 #endif
 
     return fonts;
+}
+
+void SetClipboardText(const std::string &text) {
+    QGuiApplication::clipboard()->setText(QString::fromStdString(text));
 }
 
 void OpenInBrowser(const std::string& url) {

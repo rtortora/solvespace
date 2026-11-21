@@ -1797,6 +1797,12 @@ void OpenInBrowser(const std::string &url) {
     [[NSWorkspace sharedWorkspace] openURL:[NSURL URLWithString:Wrap(url)]];
 }
 
+void SetClipboardText(const std::string &text) {
+    NSPasteboard *pasteboard = [NSPasteboard generalPasteboard];
+    [pasteboard clearContents];
+    [pasteboard setString:Wrap(text) forType:NSPasteboardTypeString];
+}
+
 }
 }
 

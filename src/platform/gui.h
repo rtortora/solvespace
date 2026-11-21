@@ -413,6 +413,8 @@ FileDialogRef CreateSaveFileDialog(WindowRef parentWindow);
 
 std::vector<Platform::Path> GetFontFiles();
 void OpenInBrowser(const std::string &url);
+// Puts plain text on the system clipboard.
+void SetClipboardText(const std::string &text);
 
 std::vector<std::string> InitGui(int argc, char **argv);
 void RunGui();

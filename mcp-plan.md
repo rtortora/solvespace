@@ -9,17 +9,17 @@ back, screenshots, camera and display control.
 ## Start here (for a fresh session)
 
 1. Read §0 (state, how to run and test) and §3 (lessons; several were bugs).
-2. Check the working tree: milestones 5b and 6 may still be uncommitted
+2. Check the working tree: Milestone 1 may still be uncommitted
    (`git status`; see "Commits so far" in §0).
-3. Build and run the tests (§0) to confirm the baseline: 24 MCP tests and
+3. Build and run the tests (§0) to confirm the baseline: 25 MCP tests and
    SolveSpace's 300 tests should pass.
-4. The next task is **Milestone 1, hardening and settings** (§5). §1 explains
-   the architecture you will be changing; §1.4 has the patterns for writing
-   tools.
+4. The next task is **Milestone 7, selection, analysis and export** (§5). §1
+   explains the architecture; §1.4 has the patterns for writing tools.
 
-Remaining milestones, in order: **1** (settings UI, token, clean shutdown),
-**7** (selection, analysis, export), **8** (headless/CI, MCP resources). The
-optional 5b/6 follow-ups in §5 are small and can be done any time.
+Remaining milestones, in order: **7** (selection, analysis, export), **8**
+(headless/CI, MCP resources). The optional 5b/6 follow-ups in §5 are small
+and can be done any time. Milestone 1's configuration screen still needs a
+look by hand (§5).
 
 ---
 
@@ -28,9 +28,9 @@ optional 5b/6 follow-ups in §5 are small and can be done any time.
 | | |
 |---|---|
 | Branch | `mcp-server` (from `main`; the upstream main branch is `master`) |
-| Done | Milestone 0 (vertical slice), milestones 2–5 (documents/groups, sketching, constraints, 3D operations), **5b (modelling ergonomics)** and **6 (view, navigation, display, styles)**. 63 tools. |
-| Not done | Milestone 1 (settings UI, token; **next**, see §5), 7 (selection/analysis/export), 8 (headless/CI) |
-| Tests | `test/mcp/mcp_tests.py`: 24 end-to-end tests against a live GUI, all passing, including the chair as an acceptance test. SolveSpace's own suite (`cmake --build build --target test_solvespace`): 300 cases passing. |
+| Done | Milestone 0 (vertical slice), **1 (settings, token, clean shutdown)**, 2–5 (documents/groups, sketching, constraints, 3D operations), 5b (modelling ergonomics) and 6 (view, navigation, display, styles). 63 tools. |
+| Not done | 7 (selection/analysis/export; **next**), 8 (headless/CI) |
+| Tests | `test/mcp/mcp_tests.py`: 25 end-to-end tests against a live GUI, all passing, including the chair as an acceptance test. SolveSpace's own suite (`cmake --build build --target test_solvespace`): 300 cases passing. |
 | Field test | Claude modelled a kitchen chair over MCP: 16 calls and three ~70-point listings. With 5b, the same chair (`test_chair_acceptance`) takes 3 calls (one `batch`, a summary, a 3-view screenshot) and ~11 KB of text results, every group at 0 DOF. |
 | Platforms | Only the macOS build has been compiled and run. The GTK, Windows and Qt changes are small and mechanical but have not been compiled. |
 
@@ -48,15 +48,22 @@ committed (they are listed in `.git/info/exclude`). `run-mcp.sh` calls
 `build/bin/SolveSpace.app/Contents/MacOS/SolveSpace` with `SOLVESPACE_MCP_PORT`
 set.
 
-MCP is off unless one of these is given: `--mcp`, `--mcp=PORT`, or the
-`SOLVESPACE_MCP_PORT` environment variable. `run-mcp.sh` uses the environment
-variable.
+MCP starts if the configuration screen's "enable MCP server" is on (saved
+settings `McpEnabled`, `McpPort`, `McpToken`), or for one run with `--mcp`,
+`--mcp=PORT` or `SOLVESPACE_MCP_PORT`, which override the saved port.
+`SOLVESPACE_MCP_TOKEN` (if set, even empty) overrides the saved token.
+`run-mcp.sh` uses the environment variable. Both overrides last until the
+user changes the corresponding setting in the configuration screen.
 
 Connect Claude Code once with:
 
 ```sh
 claude mcp add --transport http solvespace http://127.0.0.1:47474/mcp
+# with a token:  ... --header "Authorization: Bearer TOKEN"
 ```
+
+The configuration screen's "copy connect command" puts the right command
+(port and token) on the clipboard.
 
 **After a rebuild that adds or changes tools, reconnect with `/mcp`.**
 Claude Code caches the tool list and schemas. A stale session only sees the
@@ -73,12 +80,20 @@ unsaved changes.
 SOLVESPACE_MCP_PORT=47475 build/bin/SolveSpace.app/Contents/MacOS/SolveSpace &
 python3 test/mcp/mcp_tests.py --url http://127.0.0.1:47475/mcp --out /tmp/mcp-out
 python3 test/mcp/mcp_tests.py ... -k constraints     # run a subset
+# token test: start SolveSpace with SOLVESPACE_MCP_TOKEN=xyz too, and run the
+# tests with the same variable (or --token xyz). Without one, test_token only
+# checks that no token is required.
 python3 test/mcp/mcp_smoke.py --url ...              # milestone 0 smoke test
 ```
 
 `--out` collects saved `.slvs` files and screenshots (`extrude_cut.png`,
 `revolve.png`, `helix.png`, `translate.png`, `view_*.png`, `chair_*.png`,
 `window.png`, ...). Look at them: a test that passes can still render wrongly.
+
+**Quitting a test instance:** quit it by PID, e.g.
+`osascript -l JavaScript -e "ObjC.import('AppKit'); $.NSRunningApplication.runningApplicationWithProcessIdentifier(PID).terminate"`.
+`tell application "SolveSpace" to quit` picks an app by name and may quit the
+user's own copy instead.
 
 **Settings warning.** The test instance shares SolveSpace's saved settings
 with the user's own copy, and some tools change settings that SolveSpace
@@ -100,11 +115,11 @@ The tool name is the positional parameter `_tool`, so that tools taking a
 1. `4dc31fed` Milestone 0: HTTP server, job pump, message capture, 5 tools.
 2. `96cfa87f` Milestones 2–5, plus fixes from an independent code review.
 3. `1bd9040a` Handoff update.
-4. Milestones 5b and 6: compact results, offset/face sketches, `find_faces`,
-   `constrain`, `batch`, screenshot views; view, display and style tools.
-   Uncommitted when this was written; if `git status` shows the files in §1.6
-   as modified, commit them first (one commit, "MCP: modelling ergonomics and
-   view/display tools (milestones 5b and 6)").
+4. `223da4ae` Milestones 5b and 6: compact results, offset/face sketches,
+   `find_faces`, `constrain`, `batch`, screenshot views; view, display and
+   style tools.
+5. Milestone 1: settings, configuration screen, token, clean shutdown.
+   Possibly uncommitted when this was written.
 
 ---
 
@@ -126,7 +141,10 @@ The tool name is the positional parameter `_tool`, so that tools taking a
     the peer is 127/8 as well.
   * An `Origin` header, if present, must be `http(s)://localhost` or
     `http(s)://127.0.0.1` (DNS-rebinding protection).
-  * **There is no auth token yet** (Milestone 1).
+  * If a token is set, every request to `/mcp` needs
+    `Authorization: Bearer <token>` (scheme case-insensitive, constant-time
+    comparison), else `401` with `WWW-Authenticate: Bearer`. The token is
+    stored in plain text in SolveSpace's settings.
 * `initialize` returns `instructions`: a primer on SolveSpace's model (ordered
   groups, the active group, requests vs. entities, DOF, units, handles, the
   typical workflow). It lives in `tools_model.cpp`, `ServerInstructions`.
@@ -152,6 +170,19 @@ The tool name is the positional parameter `_tool`, so that tools taking a
   holds pointers into the sketch. The Qt message box has not been audited.
 * `initialize`, `ping` and `tools/list` are answered on the HTTP thread. The
   tool registry is built once, on the GUI thread, before the listener starts.
+* State shared with HTTP threads (job queue, token, session id, last client)
+  is in `SharedState`, which is allocated once and never destroyed, so a
+  straggling thread at exit can't touch destroyed statics.
+* **Lifecycle (M1).** `Mcp::Setup` (from `entrygui.cpp`) installs hooks in
+  `SS.mcp` (`applyServer`, `applyToken`, `status`, `connectCommand`,
+  `shutdown`) and starts the server. The core library (configuration screen,
+  `SS.Exit`) only calls these hooks, because `HAVE_MCP` is defined for the
+  GUI target only; with no hooks the screen hides the MCP section.
+  `StopServer` refuses new calls, fails queued ones ("server stopped"), drops
+  a pending window-screenshot hook, shuts down every open connection
+  (`HttpServer` tracks them) and waits up to 5 s for their threads.
+  `SS.Exit` calls it, because on macOS `ExitGui()` calls `exit()` and the
+  code after `RunGui()` never runs.
 
 ### 1.3 A tool call (`CallToolOnGuiThread`, mcpserver.cpp)
 
@@ -264,7 +295,11 @@ src/ui.h, src/draw.cpp          GraphicsWindow::onFrameCaptured (window screensh
 src/file.cpp                    LocateImportedFile: no prompt while capturing
 src/platform/gui.{h,cpp}        Platform::modalDepth / ModalScope
 src/platform/gui*.{cpp,mm}      ModalScope in each RunModal/ShowModal
-src/platform/entrygui.cpp       --mcp / env parsing, StartServer/StopServer
+src/platform/entrygui.cpp       --mcp / env parsing, Mcp::Setup/StopServer
+src/solvespace.{h,cpp}          SS.mcp settings and hooks, FreezeMcpSettings,
+                                shutdown hook in Exit()
+src/confscreen.cpp, src/ui.h    MCP section of the configuration screen
+src/platform/gui*.{cpp,mm}      Platform::SetClipboardText (all backends)
 CMakeLists.txt, src/CMakeLists  ENABLE_MCP option; GUI target only (not Qt or
                                 Emscripten); adds render/rendercairo.cpp for
                                 screenshots
@@ -371,6 +406,21 @@ Behaviour worth knowing:
 ## 4. Completed milestones (summary of what was asked for and what changed)
 
 * **M0, vertical slice.** As planned.
+* **M1, hardening and settings.** As planned:
+  * Saved settings `McpEnabled`/`McpPort`/`McpToken`; command line and
+    environment override them for one run. Settings are also saved as soon
+    as they're changed in the screen (other settings only at exit).
+  * Configuration screen section: enable, port, token (masked to its last 4
+    characters; `[show/change]` opens the editor with the full token,
+    `[generate]` makes 128 random bits as hex, `[clear]`), status, last client
+    and time of its last request, and "copy connect command" (new
+    `Platform::SetClipboardText`). Toggling or changing the port starts,
+    stops or restarts the server at once; a port that can't be bound shows
+    "could not start: port N is already in use" in red.
+  * Bearer token, `test_token`; clean shutdown as described in §1.2.
+    Verified by quitting with two idle keep-alive connections open: both
+    closed within 0.15 s and the app exited without a crash report.
+  * Not done: a status in the window title (optional in the plan).
 * **M2, documents and groups.** `list_groups` and `get_document_info` were
   folded into `get_model_summary`. `delete` was added here.
 * **M3, sketch entities.** The mouse code was **not** refactored; the tools
@@ -404,55 +454,19 @@ Behaviour worth knowing:
 
 ## 5. Next steps (in priority order)
 
-### Milestone 1 — Hardening and settings (do this next)
+### Milestone 1 — check by hand
 
-Goal: a user who never touches a terminal can turn MCP on, and it is safe to
-leave on.
+Done (see §4); what couldn't be checked from here:
+* **The configuration screen** (⌘, or the text window's "configuration"
+  link) wasn't seen: this session couldn't send key presses or capture a
+  single window. Check the layout, the checkbox, `[change]` on port and token,
+  `[generate]`, `[clear]`, the status line (green when listening, red with
+  the reason when the port is taken), the "client" line updating when a
+  client connects, and that "copy connect command" puts the command on the
+  clipboard.
+* GTK3/GTK4/Windows/Qt/HTML `SetClipboardText` haven't been compiled.
 
-1. **Persistent settings.** Add `mcpEnabled`, `mcpPort` and `mcpToken` to
-   `SolveSpaceUI` (`solvespace.h`), thawed and frozen next to the other
-   settings in `solvespace.cpp` (e.g. `CameraTangent` is thawed at line ~69 and
-   frozen at ~271). This matters on macOS, where an app launched from Finder
-   gets no arguments or environment.
-   * Precedence: `--mcp[=PORT]` / `SOLVESPACE_MCP_PORT` (`Mcp::PortFromArgs`,
-     called in `src/platform/entrygui.cpp`) override the saved settings for
-     that run; otherwise start the server if `mcpEnabled`.
-2. **Configuration screen.** Add an "MCP server" section to
-   `TextWindow::ShowConfiguration` (`src/confscreen.cpp`): enable/disable, the
-   port, the token (show it masked; offer "generate"), and the status line.
-   Edits go through the `Edit::...` enum and `EditControlDone` cases in the
-   same file (see `Edit::CAMERA_TANGENT` for the pattern). Toggling must start
-   or stop the server at once (`Mcp::StartServer` / `StopServer`); a port that
-   can't be bound must show an error in the screen, not just on stderr.
-3. **"Copy connect command"** in that section: puts
-   `claude mcp add --transport http solvespace http://127.0.0.1:PORT/mcp` on the
-   clipboard, with `--header "Authorization: Bearer TOKEN"` when a token is set.
-   Check what clipboard API `Platform` offers (the GUI copies text elsewhere,
-   e.g. for the property browser).
-4. **Bearer token.** In `HandleHttp` (`mcpserver.cpp`), next to the Origin
-   check, reject requests without `Authorization: Bearer <token>` with 401 when
-   a token is configured. Compare in constant time. `HttpRequest::Header()` is
-   case-insensitive already (`httpserver.h`). Add a test: the client in
-   `test/mcp/mcp_client.py` needs an optional header.
-5. **Status indicator.** `HandleInitialize` already logs `clientInfo.name`;
-   keep the last client's name and time (atomically, it runs on an HTTP
-   thread) and show "MCP: listening on 47474" / "connected: claude-code" in the
-   configuration screen, and optionally the window title.
-6. **Clean shutdown.** Connection threads are detached
-   (`httpserver.cpp`, `std::thread(ServeConnection...).detach()` at ~176) and
-   can touch the static `queue`/`queueMutex` (`mcpserver.cpp`) during static
-   destruction at exit. Track them (a counter plus condition variable, or a
-   list of sockets to shut down), close their sockets in `HttpServer::Stop`,
-   and wait for them; fail queued jobs on stop.
-7. Update `run-mcp.sh` only if useful (it's local, not committed), the
-   `ServerInstructions` if behaviour changes, and this file.
-
-Done when: MCP can be enabled from the configuration screen and survives a
-restart; a token, when set, is required; quitting SolveSpace with a client
-connected doesn't crash; tests cover the token; the other platforms' code at
-least looks right (only macOS can be built here).
-
-### Milestone 7 — Selection, picking, analysis and export
+### Milestone 7 — Selection, picking, analysis and export (do this next)
 
 * `select`, `clear_selection`, `get_selection` (so the user can say
   "constrain what I've selected").
@@ -487,6 +501,9 @@ least looks right (only macOS can be built here).
 
 ## 6. Known gaps and risks
 
+* **Settings written by two instances:** each instance writes all its
+  settings at exit, so a test instance started before the user changed the
+  MCP settings in another instance writes the old values back when it quits.
 * **Not tested by hand:** a tool call while the user has a modal dialog open.
   It should wait, then run when the dialog closes, or report "UI busy, not
   executed" after 30 s.

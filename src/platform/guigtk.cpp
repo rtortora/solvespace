@@ -12,6 +12,7 @@
 #include <glibmm/main.h>
 #include <gtkmm/box.h>
 #include <gtkmm/checkmenuitem.h>
+#include <gtkmm/clipboard.h>
 #include <gtkmm/cssprovider.h>
 #include <gtkmm/entry.h>
 #include <gtkmm/filechooserdialog.h>
@@ -1814,6 +1815,10 @@ std::vector<Platform::Path> GetFontFiles() {
 void OpenInBrowser(const std::string &url) {
     // first param should be our window?
     gtk_show_uri_on_window(NULL, url.c_str(), GDK_CURRENT_TIME, NULL);
+}
+
+void SetClipboardText(const std::string &text) {
+    Gtk::Clipboard::get()->set_text(text);
 }
 
 Gtk::Main *gtkMain;

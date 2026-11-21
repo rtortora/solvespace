@@ -364,7 +364,15 @@ static void ScreenshotWindow(ToolResult *res) {
             throw ToolError("The SolveSpace window wasn't redrawn within 10 s (is it "
                             "minimized or hidden?). Use source='render' instead.");
         }
-        r->content.push_back(ImageContent(future.get()));
+        std::vector<uint8_t> png;
+        try {
+            png = future.get();
+        } catch(std::future_error &) {
+            // StopServer() dropped the capture hook.
+            throw ToolError("SolveSpace's MCP server stopped before the window was "
+                            "redrawn.");
+        }
+        r->content.push_back(ImageContent(png));
     };
 }
 

@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 
@@ -13,6 +14,7 @@
 #   include <ws2tcpip.h>
     typedef int socklen_t;
 #   define CLOSE_SOCKET closesocket
+#   define SHUT_RDWR SD_BOTH
 #   pragma comment(lib, "ws2_32.lib")
 #else
 #   include <arpa/inet.h>
@@ -134,15 +136,16 @@ bool HttpServer::Start(uint16_t port, Handler h, std::string *error) {
         return false;
     }
 
-    listenFd = fd;
-    handler  = std::make_shared<Handler>(h);
-    running  = true;
+    listenFd    = fd;
+    handler     = std::make_shared<Handler>(h);
+    connections = std::make_shared<Connections>();
+    running     = true;
     acceptThread = std::thread([this] { AcceptLoop(); });
     return true;
 }
 
-void HttpServer::Stop() {
-    if(!running) return;
+bool HttpServer::Stop(int timeoutMs) {
+    if(!running) return true;
     running = false;
 #if defined(_WIN32)
     closesocket((SOCKET)listenFd);
@@ -153,6 +156,21 @@ void HttpServer::Stop() {
 #endif
     listenFd = -1;
     if(acceptThread.joinable()) acceptThread.join();
+
+    // The connection threads close their own sockets (after removing them
+    // from the set, under the lock), so shutting them down here can't hit a
+    // reused descriptor.
+    std::unique_lock<std::mutex> lock(connections->mutex);
+    connections->closing = true;
+    for(intptr_t fd : connections->fds) {
+#if defined(_WIN32)
+        shutdown((SOCKET)fd, SHUT_RDWR);
+#else
+        shutdown((int)fd, SHUT_RDWR);
+#endif
+    }
+    return connections->finished.wait_for(lock, std::chrono::milliseconds(timeoutMs),
+                                          [&] { return connections->fds.empty(); });
 }
 
 void HttpServer::AcceptLoop() {
@@ -173,7 +191,23 @@ void HttpServer::AcceptLoop() {
         int one = 1;
         setsockopt((int)client, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof(one));
 #endif
-        std::thread(ServeConnection, client, handler).detach();
+        {
+            std::lock_guard<std::mutex> lock(connections->mutex);
+            if(connections->closing) {
+                CLOSE_SOCKET((int)client);
+                break;
+            }
+            connections->fds.insert(client);
+        }
+        std::shared_ptr<Handler> h = handler;
+        std::shared_ptr<Connections> conns = connections;
+        std::thread([client, h, conns] {
+            ServeConnection(client, h);
+            std::lock_guard<std::mutex> lock(conns->mutex);
+            conns->fds.erase(client);
+            CLOSE_SOCKET((int)client);
+            conns->finished.notify_all();
+        }).detach();
     }
 }
 
@@ -200,7 +234,6 @@ void HttpServer::ServeConnection(intptr_t fd, std::shared_ptr<Handler> handler) 
         size_t headEnd;
         while((headEnd = buf.find("\r\n\r\n")) == std::string::npos) {
             if(buf.size() > MAX_HEADER_BYTES || !ReadMore()) {
-                CLOSE_SOCKET((int)fd);
                 return;
             }
         }
@@ -217,7 +250,6 @@ void HttpServer::ServeConnection(intptr_t fd, std::shared_ptr<Handler> handler) 
             HttpResponse bad;
             bad.status = 400;
             SendResponse(fd, bad, false);
-            CLOSE_SOCKET((int)fd);
             return;
         }
         req.method = requestLine.substr(0, sp1);
@@ -245,12 +277,10 @@ void HttpServer::ServeConnection(intptr_t fd, std::shared_ptr<Handler> handler) 
             HttpResponse tooBig;
             tooBig.status = 413;
             SendResponse(fd, tooBig, false);
-            CLOSE_SOCKET((int)fd);
             return;
         }
         while(buf.size() < contentLength) {
             if(!ReadMore()) {
-                CLOSE_SOCKET((int)fd);
                 return;
             }
         }
@@ -269,7 +299,6 @@ void HttpServer::ServeConnection(intptr_t fd, std::shared_ptr<Handler> handler) 
         SendResponse(fd, resp, keepAlive);
         if(!keepAlive) break;
     }
-    CLOSE_SOCKET((int)fd);
 }
 
 } // namespace Mcp

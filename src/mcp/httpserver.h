@@ -8,9 +8,12 @@
 #define SOLVESPACE_MCP_HTTPSERVER_H
 
 #include <atomic>
+#include <condition_variable>
 #include <functional>
 #include <map>
 #include <memory>
+#include <mutex>
+#include <set>
 #include <string>
 #include <thread>
 
@@ -47,16 +50,29 @@ public:
     // Binds 127.0.0.1:port and starts the accept thread. On failure, returns
     // false and sets *error.
     bool Start(uint16_t port, Handler handler, std::string *error);
-    void Stop();
+    // Stops accepting, shuts down the open connections (which wakes up
+    // threads blocked reading them), and waits up to `timeoutMs` for their
+    // threads to finish. Returns false if some were still running.
+    bool Stop(int timeoutMs = 5000);
 
 private:
+    // The open connections. Shared with the connection threads, so it
+    // outlives the server if one of them doesn't finish in time.
+    struct Connections {
+        std::mutex              mutex;
+        std::condition_variable finished;
+        std::set<intptr_t>      fds;
+        bool                    closing = false;
+    };
+
     void AcceptLoop();
     static void ServeConnection(intptr_t fd, std::shared_ptr<Handler> handler);
 
-    intptr_t                    listenFd;
-    std::atomic<bool>           running;
-    std::thread                 acceptThread;
-    std::shared_ptr<Handler>    handler;
+    intptr_t                     listenFd;
+    std::atomic<bool>            running;
+    std::thread                  acceptThread;
+    std::shared_ptr<Handler>     handler;
+    std::shared_ptr<Connections> connections;
 };
 
 } // namespace Mcp

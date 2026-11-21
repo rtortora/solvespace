@@ -8,6 +8,7 @@
 #if defined(_OPENMP)
 #include <omp.h>
 #endif
+#include <random>
 
 namespace SolveSpace {
 
@@ -214,6 +215,80 @@ void TextWindow::ScreenChangeAnimationSpeed(int link, uint32_t v) {
     SS.TW.edit.meaning = Edit::ANIMATION_SPEED;
 }
 
+// Set when the MCP connect command was copied; cleared by other MCP actions.
+static bool mcpCommandCopied = false;
+
+static std::string GenerateMcpToken() {
+    std::random_device rd;
+    std::string token;
+    for(int i = 0; i < 4; i++) token += ssprintf("%08x", (uint32_t)rd());
+    return token;
+}
+
+void TextWindow::ScreenChangeMcp(int link, uint32_t v) {
+    mcpCommandCopied = false;
+    switch(link) {
+        case 'e':
+            SS.mcp.enabled = !SS.mcp.enabled;
+            SS.FreezeMcpSettings();
+            SS.mcp.applyServer();
+            break;
+        case 'p':
+            SS.TW.ShowEditControl(3, std::to_string(SS.mcp.port));
+            SS.TW.edit.meaning = Edit::MCP_PORT;
+            break;
+        case 't':
+            SS.TW.ShowEditControl(3, SS.mcp.token);
+            SS.TW.edit.meaning = Edit::MCP_TOKEN;
+            break;
+        case 'g':
+        case 'x':
+            SS.mcp.token = (link == 'g') ? GenerateMcpToken() : "";
+            SS.FreezeMcpSettings();
+            SS.mcp.applyToken();
+            break;
+        case 'c':
+            Platform::SetClipboardText(SS.mcp.connectCommand());
+            mcpCommandCopied = true;
+            break;
+    }
+    SS.ScheduleShowTW();
+}
+
+void TextWindow::ShowMcpConfiguration() {
+    // Only GUI builds with the MCP server install the hooks.
+    if(!SS.mcp.applyServer) return;
+
+    SolveSpaceUI::McpStatus status = SS.mcp.status();
+    std::string token = "(none)";
+    if(!SS.mcp.token.empty()) {
+        size_t n = SS.mcp.token.size();
+        token = "********" + (n > 4 ? SS.mcp.token.substr(n - 4) : "");
+    }
+
+    Printf(false, "");
+    Printf(false, "%Ft MCP server (lets local AI clients such as Claude drive SolveSpace)%E");
+    Printf(false, "  %Fd%f%Le%s  enable MCP server%E",
+        &ScreenChangeMcp, SS.mcp.enabled ? CHECK_TRUE : CHECK_FALSE);
+    Printf(false, "%Ba%Ft   port:   %Fd%d %Fl%Lp%f[change]%E",
+        SS.mcp.port, &ScreenChangeMcp);
+    if(SS.mcp.token.empty()) {
+        Printf(false, "%Bd%Ft   token:  %Fd%s %Fl%Lt%f[change]%E %Fl%Lg%f[generate]%E",
+            token.c_str(), &ScreenChangeMcp, &ScreenChangeMcp);
+    } else {
+        Printf(false, "%Bd%Ft   token:  %Fd%s %Fl%Lt%f[show/change]%E "
+                      "%Fl%Lg%f[generate]%E %Fl%Lx%f[clear]%E",
+            token.c_str(), &ScreenChangeMcp, &ScreenChangeMcp, &ScreenChangeMcp);
+    }
+    Printf(false, "%Ba%Ft   status: %Fp%s%E",
+        status.error ? 'x' : (status.running ? 's' : 'd'), status.text.c_str());
+    if(!status.lastClient.empty()) {
+        Printf(false, "%Bd%Ft   client: %Fd%s%E", status.lastClient.c_str());
+    }
+    Printf(false, "  %Fl%Lc%f[copy connect command for Claude Code]%E%s",
+        &ScreenChangeMcp, mcpCommandCopied ? "  copied!" : "");
+}
+
 void TextWindow::ShowConfiguration() {
     int i;
     Printf(true, "%Ft user color (r, g, b)");
@@ -377,6 +452,8 @@ void TextWindow::ShowConfiguration() {
     Printf(false, "%Ft animation speed (in ms; 0 to disable)%E");
     Printf(false, "%Ba   %d %Fl%Ll%f[change]%E",
         SS.animationSpeed, &ScreenChangeAnimationSpeed);
+
+    ShowMcpConfiguration();
 
     if(canvas) {
         const char *gl_vendor, *gl_renderer, *gl_version;
@@ -571,6 +648,37 @@ bool TextWindow::EditControlDoneForConfiguration(const std::string &s) {
                 } else {
                     SS.timeoutRedundantConstr = 1000;
                 }
+            }
+            break;
+        }
+        case Edit::MCP_PORT: {
+            char *end;
+            long port = strtol(s.c_str(), &end, 10);
+            if(s.empty() || *end != '\0' || port < 1 || port > 65535) {
+                Error(_("Bad value: the port must be a number from 1 to 65535"));
+            } else {
+                SS.mcp.port = (int)port;
+                SS.FreezeMcpSettings();
+                SS.mcp.applyServer();
+            }
+            break;
+        }
+        case Edit::MCP_TOKEN: {
+            std::string token = s;
+            token.erase(0, token.find_first_not_of(" \t"));
+            token.erase(token.find_last_not_of(" \t") + 1);
+            bool valid = true;
+            for(char c : token) {
+                // Visible ASCII: the token goes into an HTTP header.
+                if(c <= ' ' || c > '~') valid = false;
+            }
+            if(!valid) {
+                Error(_("Bad value: the token may only contain visible ASCII characters "
+                        "(no spaces)"));
+            } else {
+                SS.mcp.token = token;
+                SS.FreezeMcpSettings();
+                SS.mcp.applyToken();
             }
             break;
         }

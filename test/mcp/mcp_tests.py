@@ -1,25 +1,32 @@
 #!/usr/bin/env python3
-"""End-to-end tests for the SolveSpace MCP tools (milestones 0-6).
+"""End-to-end tests for the SolveSpace MCP server and tools (milestones 0-6).
 
 Start SolveSpace with MCP enabled (e.g. SOLVESPACE_MCP_PORT=47475), then:
 
     python3 test/mcp/mcp_tests.py --url http://127.0.0.1:47475/mcp --out DIR
+
+To test the token as well, also set SOLVESPACE_MCP_TOKEN for both SolveSpace
+and the tests (or pass --token).
 
 The tests start new documents (discarding unsaved changes) and write files
 and screenshots to DIR.
 """
 import argparse
 import base64
+import json
 import math
 import os
 import sys
 import traceback
+import urllib.error
+import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from mcp_client import Client, ToolFailed  # noqa: E402
 
 C = None
 OUT = None
+TOKEN = None
 
 
 def close(a, b, tol=1e-6):
@@ -804,7 +811,52 @@ def test_chair_acceptance():
     assert len(sizes) <= 5
 
 
+# ---------------------------------------------------------------------------
+# Milestone 1: bearer token
+# ---------------------------------------------------------------------------
+def http_status(headers):
+    """POSTs a ping with exactly these extra headers; returns the HTTP status."""
+    body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "ping"}).encode()
+    h = {"Content-Type": "application/json", "Accept": "application/json"}
+    h.update(headers)
+    req = urllib.request.Request(C.url, data=body, headers=h)
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            resp.read()
+            return resp.status
+    except urllib.error.HTTPError as e:
+        if e.code == 401:
+            assert "Bearer" in e.headers.get("WWW-Authenticate", ""), e.headers
+        return e.code
+
+
+def test_token():
+    if not TOKEN:
+        # Without a token the server must accept unauthenticated requests.
+        assert http_status({}) == 200
+        print("  (no --token given: only checked that no token is required; start "
+              "SolveSpace with SOLVESPACE_MCP_TOKEN=... and pass --token to test it)")
+        return
+    assert http_status({}) == 401
+    assert http_status({"Authorization": "Bearer wrong"}) == 401
+    assert http_status({"Authorization": "Bearer " + TOKEN + "x"}) == 401
+    assert http_status({"Authorization": "Bearer " + TOKEN[:-1] + "?"}) == 401
+    assert http_status({"Authorization": "Basic " + TOKEN}) == 401
+    assert http_status({"Authorization": TOKEN}) == 401
+    assert http_status({"Authorization": "Bearer " + TOKEN}) == 200
+    assert http_status({"Authorization": "bearer " + TOKEN}) == 200
+    # Tool calls need it too, not only ping.
+    unauth = Client(C.url)
+    try:
+        unauth.tools()
+        raise AssertionError("tools/list succeeded without a token")
+    except urllib.error.HTTPError as e:
+        assert e.code == 401
+    assert C.tools()
+
+
 TESTS = [
+    test_token,
     test_document_and_undo, test_groups, test_delete,
     test_sketch_entities, test_sketch_3d, test_fillet_and_move,
     test_constraints, test_dimension_values_and_params,
@@ -818,15 +870,18 @@ TESTS = [
 
 
 def main():
-    global C, OUT
+    global C, OUT, TOKEN
     ap = argparse.ArgumentParser()
     ap.add_argument("--url", default="http://127.0.0.1:47474/mcp")
     ap.add_argument("--out", required=True, help="directory for files and screenshots")
     ap.add_argument("-k", default="", help="only run tests whose name contains this")
+    ap.add_argument("--token", default=os.environ.get("SOLVESPACE_MCP_TOKEN"),
+                    help="the server's token (default: $SOLVESPACE_MCP_TOKEN)")
     a = ap.parse_args()
     OUT = os.path.abspath(a.out)
     os.makedirs(OUT, exist_ok=True)
-    C = Client(a.url)
+    TOKEN = a.token
+    C = Client(a.url, TOKEN)
     C.initialize()
     failed = 0
     for t in TESTS:

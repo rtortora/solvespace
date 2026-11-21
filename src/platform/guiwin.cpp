@@ -2093,6 +2093,21 @@ void OpenInBrowser(const std::string &url) {
     ShellExecuteW(NULL, L"open", Widen(url).c_str(), NULL, NULL, SW_SHOWNORMAL);
 }
 
+void SetClipboardText(const std::string &text) {
+    std::wstring wide = Widen(text);
+    size_t bytes = (wide.size() + 1) * sizeof(wchar_t);
+    if(!OpenClipboard(NULL)) return;
+    EmptyClipboard();
+    HGLOBAL mem = GlobalAlloc(GMEM_MOVEABLE, bytes);
+    if(mem != NULL) {
+        memcpy(GlobalLock(mem), wide.c_str(), bytes);
+        GlobalUnlock(mem);
+        // On success the clipboard owns the memory.
+        if(SetClipboardData(CF_UNICODETEXT, mem) == NULL) GlobalFree(mem);
+    }
+    CloseClipboard();
+}
+
 std::vector<std::string> InitGui(int argc, char **argv) {
     std::vector<std::string> args = InitCli(argc, argv);
 

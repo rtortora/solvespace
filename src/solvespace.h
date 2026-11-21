@@ -633,6 +633,31 @@ public:
     bool     explode;
     double   explodeDistance;
 
+    // The MCP server, which lets local AI clients drive the GUI. The settings
+    // are saved; the hooks are installed by the server when SolveSpace is
+    // built with it (ENABLE_MCP), and are empty otherwise.
+    struct McpStatus {
+        bool        running;
+        bool        error;          // `text` describes a failure to start
+        std::string text;           // e.g. "listening on http://..."
+        std::string lastClient;     // e.g. "claude-code, last request 14:02:11"
+    };
+    struct {
+        bool        enabled;
+        int         port;
+        std::string token;          // empty: no token required
+
+        // Starts, stops or restarts the server to match enabled/port.
+        std::function<void()>       applyServer;
+        // Makes the server use `token`.
+        std::function<void()>       applyToken;
+        std::function<McpStatus()>  status;
+        // The `claude mcp add ...` command for this server.
+        std::function<std::string()> connectCommand;
+        // Stops the server and its connections; called on exit.
+        std::function<void()>       shutdown;
+    }        mcp;
+
     std::string MmToString(double v, bool editable=false);
     std::string MmToStringSI(double v, int dim = 0);
     std::string DegreeToString(double v);
@@ -657,6 +682,7 @@ public:
     // The platform-dependent code calls this before entering the msg loop
     void Init();
     void Exit();
+    void FreezeMcpSettings();
 
     // File load/save routines, including the additional files that get
     // loaded when we have link groups.

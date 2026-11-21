@@ -12,6 +12,7 @@
 #include <cstring>
 #include <condition_variable>
 #include <cstdlib>
+#include <ctime>
 #include <deque>
 #include <future>
 #include <mutex>
@@ -47,13 +48,46 @@ struct Job {
     std::atomic<int>             state{QUEUED};
 };
 
-static std::mutex                           queueMutex;
-static std::deque<std::shared_ptr<Job>>     queue;
+// State shared by the GUI thread and the HTTP threads, guarded by `mutex`.
+// It is allocated once and never destroyed, so that a connection thread
+// still running at exit can't touch it during static destruction.
+struct SharedState {
+    std::mutex                          mutex;
+    std::deque<std::shared_ptr<Job>>    queue;
+    // False while the server is stopped or stopping: no new jobs.
+    bool                                accepting = false;
+    std::string                         sessionId;
+    // If not empty, requests need "Authorization: Bearer <token>".
+    std::string                         token;
+    std::string                         lastClient;
+    std::time_t                         lastRequest = 0;
+    // Set when the status shown in the configuration screen has changed.
+    std::atomic<bool>                   statusChanged{false};
+};
+
+static SharedState &Shared() {
+    static SharedState *state = new SharedState();
+    return *state;
+}
+
+// GUI-thread state.
 static Platform::TimerRef                   pumpTimer;
 static std::unique_ptr<HttpServer>          httpServer;
-static std::string                          sessionId;
+static uint16_t                             runningPort  = 0;
+// From --mcp[=PORT] / SOLVESPACE_MCP_PORT; overrides the saved settings
+// until the user changes them in the configuration screen.
+static uint16_t                             overridePort = 0;
+// From SOLVESPACE_MCP_TOKEN; overrides the saved token likewise.
+static bool                                 tokenFromEnv = false;
+static std::string                          envToken;
+// Why the server last failed to start, if it did.
+static std::string                          startError;
 
 static void Pump() {
+    if(Shared().statusChanged.exchange(false) &&
+       SS.TW.shown.screen == TextWindow::Screen::CONFIGURATION) {
+        SS.ScheduleShowTW();
+    }
     // Don't run tools inside a modal dialog's nested event loop: the code
     // that opened the dialog may hold pointers into the sketch that a tool
     // would invalidate. Try again once the dialog is closed.
@@ -64,10 +98,11 @@ static void Pump() {
     for(;;) {
         std::shared_ptr<Job> job;
         {
-            std::lock_guard<std::mutex> lock(queueMutex);
-            if(queue.empty()) break;
-            job = queue.front();
-            queue.pop_front();
+            SharedState &shared = Shared();
+            std::lock_guard<std::mutex> lock(shared.mutex);
+            if(shared.queue.empty()) break;
+            job = shared.queue.front();
+            shared.queue.pop_front();
         }
         // If the client already gave up waiting, don't run it: it would
         // change the model behind the client's back.
@@ -88,8 +123,13 @@ static CallOutcome RunOnGuiThread(std::function<CallOutcome()> work) {
     job->work = work;
     std::future<CallOutcome> future = job->result.get_future();
     {
-        std::lock_guard<std::mutex> lock(queueMutex);
-        queue.push_back(job);
+        SharedState &shared = Shared();
+        std::lock_guard<std::mutex> lock(shared.mutex);
+        if(!shared.accepting) {
+            throw ToolError("SolveSpace's MCP server is stopping; the call was not "
+                            "executed.");
+        }
+        shared.queue.push_back(job);
     }
     if(future.wait_for(std::chrono::seconds(CALL_TIMEOUT_S)) != std::future_status::ready) {
         int expected = QUEUED;
@@ -224,6 +264,12 @@ static json HandleInitialize(const json &params) {
         clientName = params["clientInfo"].value("name", clientName);
     }
     dbp("MCP: client connected: %s (protocol %s)", clientName.c_str(), version.c_str());
+    {
+        SharedState &shared = Shared();
+        std::lock_guard<std::mutex> lock(shared.mutex);
+        shared.lastClient = clientName;
+    }
+    Shared().statusChanged = true;
 
     return {
         {"protocolVersion", version},
@@ -301,6 +347,37 @@ static bool OriginAllowed(const std::string &origin) {
     return false;
 }
 
+// Compares in time that depends only on the lengths, so a client can't
+// find the token a character at a time by timing.
+static bool ConstantTimeEquals(const std::string &a, const std::string &b) {
+    if(a.size() != b.size()) return false;
+    volatile unsigned char diff = 0;
+    for(size_t i = 0; i < a.size(); i++) {
+        diff = diff | (unsigned char)(a[i] ^ b[i]);
+    }
+    return diff == 0;
+}
+
+static bool Authorized(const HttpRequest &req) {
+    std::string token;
+    {
+        SharedState &shared = Shared();
+        std::lock_guard<std::mutex> lock(shared.mutex);
+        token = shared.token;
+    }
+    if(token.empty()) return true;
+    std::string auth = req.Header("authorization");
+    // The scheme is case-insensitive (RFC 7235).
+    static const char *SCHEME = "bearer ";
+    if(auth.size() < strlen(SCHEME)) return false;
+    for(size_t i = 0; i < strlen(SCHEME); i++) {
+        if(tolower((unsigned char)auth[i]) != SCHEME[i]) return false;
+    }
+    std::string given = auth.substr(strlen(SCHEME));
+    given.erase(0, given.find_first_not_of(' '));
+    return ConstantTimeEquals(given, token);
+}
+
 static HttpResponse HandleHttp(const HttpRequest &req) {
     HttpResponse resp;
     if(req.path != "/mcp") {
@@ -312,6 +389,19 @@ static HttpResponse HandleHttp(const HttpRequest &req) {
         resp.status = 403;
         resp.body = R"({"error":"origin not allowed"})";
         return resp;
+    }
+    if(!Authorized(req)) {
+        resp.status = 401;
+        resp.headers["WWW-Authenticate"] = "Bearer realm=\"solvespace\"";
+        resp.body = R"({"error":"this SolveSpace MCP server requires a token: send )"
+                    R"(\"Authorization: Bearer <token>\". The token is in SolveSpace's )"
+                    R"(configuration screen."})";
+        return resp;
+    }
+    {
+        SharedState &shared = Shared();
+        std::lock_guard<std::mutex> lock(shared.mutex);
+        shared.lastRequest = std::time(NULL);
     }
     if(req.method == "GET") {
         // We don't offer a server-to-client SSE stream.
@@ -346,7 +436,9 @@ static HttpResponse HandleHttp(const HttpRequest &req) {
 
     json reply = HandleMessage(msg);
     if(msg.is_object() && msg.contains("method") && msg["method"] == "initialize") {
-        resp.headers["Mcp-Session-Id"] = sessionId;
+        SharedState &shared = Shared();
+        std::lock_guard<std::mutex> lock(shared.mutex);
+        resp.headers["Mcp-Session-Id"] = shared.sessionId;
     }
     if(reply.is_null()) {
         resp.status = 202;
@@ -357,13 +449,26 @@ static HttpResponse HandleHttp(const HttpRequest &req) {
 }
 
 //-----------------------------------------------------------------------------
-// Lifecycle.
+// Lifecycle, on the GUI thread.
 //-----------------------------------------------------------------------------
+static std::string EffectiveToken() {
+    return tokenFromEnv ? envToken : SS.mcp.token;
+}
+
 bool StartServer(uint16_t port) {
+    StopServer();
+    startError.clear();
+
     std::random_device rd;
     char buf[33];
     snprintf(buf, sizeof(buf), "%08x%08x%08x%08x", rd(), rd(), rd(), rd());
-    sessionId = buf;
+    {
+        SharedState &shared = Shared();
+        std::lock_guard<std::mutex> lock(shared.mutex);
+        shared.sessionId = buf;
+        shared.token     = EffectiveToken();
+        shared.accepting = true;
+    }
 
     // Build the tool registry now, on the GUI thread, before any HTTP thread
     // can read it.
@@ -373,9 +478,13 @@ bool StartServer(uint16_t port) {
     std::string error;
     if(!httpServer->Start(port, HandleHttp, &error)) {
         fprintf(stderr, "MCP server could not start: %s\n", error.c_str());
+        startError = error;
         httpServer.reset();
+        std::lock_guard<std::mutex> lock(Shared().mutex);
+        Shared().accepting = false;
         return false;
     }
+    runningPort = port;
 
     pumpTimer = Platform::CreateTimer();
     pumpTimer->onTimeout = Pump;
@@ -386,13 +495,115 @@ bool StartServer(uint16_t port) {
 }
 
 void StopServer() {
+    // Fail the calls that are waiting to run, so their connection threads
+    // return; new calls are refused.
+    std::deque<std::shared_ptr<Job>> pending;
+    {
+        SharedState &shared = Shared();
+        std::lock_guard<std::mutex> lock(shared.mutex);
+        shared.accepting = false;
+        pending.swap(shared.queue);
+    }
+    for(std::shared_ptr<Job> &job : pending) {
+        int expected = QUEUED;
+        if(job->state.compare_exchange_strong(expected, ABANDONED)) {
+            job->result.set_exception(std::make_exception_ptr(ToolError(
+                "SolveSpace's MCP server stopped; the call was not executed.")));
+        }
+    }
+    // A window screenshot waiting for the next frame: dropping the hook
+    // breaks its promise, which wakes it up.
+    SS.GW.onFrameCaptured = nullptr;
+
     if(httpServer) {
-        httpServer->Stop();
+        if(!httpServer->Stop()) {
+            fprintf(stderr, "MCP server: some connections did not close in time\n");
+        }
         httpServer.reset();
+        fprintf(stderr, "MCP server stopped\n");
     }
     if(pumpTimer) {
         pumpTimer->onTimeout = [] {};
         pumpTimer.reset();
+    }
+    runningPort = 0;
+}
+
+static SolveSpaceUI::McpStatus Status() {
+    SolveSpaceUI::McpStatus status = {};
+    std::string token = EffectiveToken();
+    if(httpServer) {
+        status.running = true;
+        status.text = ssprintf("listening on http://127.0.0.1:%u/mcp", runningPort);
+        if(overridePort != 0) status.text += " (port from command line)";
+        if(tokenFromEnv) status.text += " (token from SOLVESPACE_MCP_TOKEN)";
+        else if(token.empty()) status.text += ", no token";
+    } else if(!startError.empty()) {
+        status.error = true;
+        status.text = "could not start: " + startError;
+    } else {
+        status.text = "off";
+    }
+
+    SharedState &shared = Shared();
+    std::lock_guard<std::mutex> lock(shared.mutex);
+    if(!shared.lastClient.empty()) {
+        status.lastClient = shared.lastClient;
+        if(shared.lastRequest != 0) {
+            char when[32];
+            std::strftime(when, sizeof(when), "%H:%M:%S",
+                          std::localtime(&shared.lastRequest));
+            status.lastClient += std::string(", last request at ") + when;
+        }
+    }
+    return status;
+}
+
+static std::string ConnectCommand() {
+    unsigned port = runningPort != 0 ? runningPort : (unsigned)SS.mcp.port;
+    std::string cmd = ssprintf(
+        "claude mcp add --transport http solvespace http://127.0.0.1:%u/mcp", port);
+    std::string token = EffectiveToken();
+    if(!token.empty()) {
+        cmd += " --header \"Authorization: Bearer " + token + "\"";
+    }
+    return cmd;
+}
+
+// After the user changed "enabled" or the port in the configuration screen.
+static void ApplyServerSettings() {
+    overridePort = 0;
+    uint16_t want = SS.mcp.enabled ? (uint16_t)SS.mcp.port : 0;
+    if(want == runningPort && httpServer) return;
+    StopServer();
+    startError.clear();
+    if(want != 0) StartServer(want);
+}
+
+// After the user changed the token in the configuration screen.
+static void ApplyToken() {
+    tokenFromEnv = false;
+    SharedState &shared = Shared();
+    std::lock_guard<std::mutex> lock(shared.mutex);
+    shared.token = SS.mcp.token;
+}
+
+void Setup(uint16_t portFromArgs) {
+    overridePort = portFromArgs;
+    const char *env = getenv("SOLVESPACE_MCP_TOKEN");
+    tokenFromEnv = (env != NULL);
+    envToken     = env ? env : "";
+
+    SS.mcp.applyServer    = ApplyServerSettings;
+    SS.mcp.applyToken     = ApplyToken;
+    SS.mcp.status         = Status;
+    SS.mcp.connectCommand = ConnectCommand;
+    SS.mcp.shutdown       = StopServer;
+
+    if(overridePort != 0) {
+        StartServer(overridePort);
+    } else if(SS.mcp.enabled) {
+        StartServer((uint16_t)SS.mcp.port);
     }
 }
 

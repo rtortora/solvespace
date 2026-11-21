@@ -22,9 +22,8 @@ int main(int argc, char** argv) {
     Platform::Open3DConnexion();
     SS.Init();
 #if defined(HAVE_MCP)
-    if(mcpPort != 0) {
-        Mcp::StartServer(mcpPort);
-    }
+    // Starts the server if the command line or the saved settings ask for it.
+    Mcp::Setup(mcpPort);
 #endif
 
     if(args.size() >= 2) {

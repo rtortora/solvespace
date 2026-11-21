@@ -53,9 +53,19 @@ const std::vector<Tool> &GetTools();
 // The text sent as `instructions` in the initialize result.
 extern const char *ServerInstructions;
 
-// Starts the server on 127.0.0.1:port. Must be called on the GUI thread,
-// after SS.Init(). Returns false (with a message on stderr) on failure.
+// Installs the server's hooks into SS.mcp (the configuration screen uses
+// them), and starts the server: on portFromArgs if it isn't 0 (see
+// PortFromArgs), else on the saved port if the saved settings enable it.
+// The SOLVESPACE_MCP_TOKEN environment variable, if set, overrides the saved
+// token. Must be called on the GUI thread, after SS.Init().
+void Setup(uint16_t portFromArgs);
+
+// Starts the server on 127.0.0.1:port, stopping it first if it's running.
+// Returns false (with a message on stderr, and in the status shown in the
+// configuration screen) on failure. On the GUI thread.
 bool StartServer(uint16_t port);
+// Fails queued calls, closes the connections and waits for their threads.
+// On the GUI thread, and not from inside a tool call.
 void StopServer();
 
 // Determines the port to use from the command line (--mcp or --mcp=PORT,

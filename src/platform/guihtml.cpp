@@ -1418,6 +1418,11 @@ void OpenInBrowser(const std::string &url) {
     val::global("window").call<void>("open", url);
 }
 
+void SetClipboardText(const std::string &text) {
+    val clipboard = val::global("navigator")["clipboard"];
+    if(!clipboard.isUndefined()) clipboard.call<val>("writeText", text);
+}
+
 
 void OnSaveFinishedCallback(const Platform::Path& filename, bool is_saveAs, bool is_autosave) {
     dbp("OnSaveFinished(): %s, is_saveAs=%d, is_autosave=%d\n", filename.FileName().c_str(), is_saveAs, is_autosave);

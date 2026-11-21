@@ -39,6 +39,8 @@
 #include <gtkmm/filedialog.h>
 #include <gtkmm/filefilter.h>
 #include <gdkmm/monitor.h>
+#include <gdkmm/clipboard.h>
+#include <gdkmm/display.h>
 #include <giomm/liststore.h>
 
 #if defined(HAVE_SPACEWARE)
@@ -1647,6 +1649,10 @@ std::vector<Platform::Path> GetFontFiles() {
 void OpenInBrowser(const std::string &url) {
     auto launcher = Gtk::UriLauncher::create(url);
     launcher->launch([](Glib::RefPtr<Gio::AsyncResult> &) {});
+}
+
+void SetClipboardText(const std::string &text) {
+    Gdk::Display::get_default()->get_clipboard()->set_text(text);
 }
 
 std::vector<std::string> InitGui(int argc, char **argv) {
