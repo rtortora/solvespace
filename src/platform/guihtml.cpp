@@ -1364,6 +1364,7 @@ public:
     }
 
     bool RunModal() override {
+        ModalScope modalScope;
         dbp("FileDialogImplHtml::RunModal()");
 
         this->jsFileManagerUI.call<void>("setBasePath", val(basePathInFilesystem));

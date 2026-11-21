@@ -1928,6 +1928,7 @@ public:
     }
 
     Response RunModal() override {
+        ModalScope modalScope;
         mbp.dwStyle = style;
 
         std::sort(buttons.begin(), buttons.end());
@@ -2036,6 +2037,7 @@ public:
     }
 
     bool RunModal() override {
+        ModalScope modalScope;
         if(isSaveDialog) {
             SetTitle(C_("title", "Save File"));
             if(GetFilename().IsEmpty()) {

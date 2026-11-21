@@ -276,7 +276,12 @@ if(ENABLE_GUI)
         target_sources(solvespace PRIVATE
             mcp/httpserver.cpp
             mcp/mcpserver.cpp
-            mcp/mcptools.cpp
+            mcp/tools_common.cpp
+            mcp/tools_model.cpp
+            mcp/tools_document.cpp
+            mcp/tools_sketch.cpp
+            mcp/tools_constraint.cpp
+            mcp/tools_ops.cpp
             render/rendercairo.cpp)
         target_include_directories(solvespace SYSTEM PRIVATE
             ${CMAKE_SOURCE_DIR}/extlib)

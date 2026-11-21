@@ -1574,6 +1574,7 @@ public:
     }
 
     Response RunModal() override {
+        ModalScope modalScope;
         // FIXME(platform/gui): figure out a way to run the alert as a sheet
         NSModalResponse nsResponse = [nsAlert runModal];
         ssassert(nsResponse >= NSAlertFirstButtonReturn &&
@@ -1663,6 +1664,7 @@ public:
     }
 
     bool RunModal() override {
+        ModalScope modalScope;
         if([nsPanel runModal] == NSModalResponseOK) {
             return true;
         } else {
@@ -1730,6 +1732,7 @@ public:
     }
 
     bool RunModal() override {
+        ModalScope modalScope;
         if(nsFilters.count == 1) {
             nsPanel.accessoryView = nil;
         }

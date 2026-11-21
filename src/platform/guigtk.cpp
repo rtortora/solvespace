@@ -1556,6 +1556,7 @@ public:
     }
 
     void ShowModal() override {
+        ModalScope modalScope;
         gtkDialog.signal_hide().connect([this] {
             auto it = std::remove(shownMessageDialogs.begin(), shownMessageDialogs.end(),
                                   shared_from_this());
@@ -1571,6 +1572,7 @@ public:
     }
 
     Response RunModal() override {
+        ModalScope modalScope;
         return ProcessResponse(gtkDialog.run());
     }
 };
@@ -1716,6 +1718,7 @@ public:
     }
 
     bool RunModal() override {
+        ModalScope modalScope;
         CheckForUntitledFile();
         if(gtkDialog.run() == Gtk::RESPONSE_OK) {
             return true;
@@ -1753,6 +1756,7 @@ public:
     }
 
     bool RunModal() override {
+        ModalScope modalScope;
         CheckForUntitledFile();
         if(gtkNative->run() == Gtk::RESPONSE_ACCEPT) {
             return true;

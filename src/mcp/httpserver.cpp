@@ -112,7 +112,12 @@ bool HttpServer::Start(uint16_t port, Handler h, std::string *error) {
         return false;
     }
     int yes = 1;
+#if defined(_WIN32)
+    // On Windows SO_REUSEADDR would let a second instance share the port.
+    setsockopt((SOCKET)fd, SOL_SOCKET, SO_EXCLUSIVEADDRUSE, (const char *)&yes, sizeof(yes));
+#else
     setsockopt((int)fd, SOL_SOCKET, SO_REUSEADDR, (const char *)&yes, sizeof(yes));
+#endif
 
     sockaddr_in addr = {};
     addr.sin_family      = AF_INET;

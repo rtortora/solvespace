@@ -240,6 +240,7 @@ public:
     }
 
     bool RunModal() override {
+        ModalScope modalScope;
         updateFilters();
         return fileDialogQ.exec();
     }

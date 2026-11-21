@@ -31,10 +31,12 @@ static const char *SUPPORTED_VERSIONS[] = {
 //-----------------------------------------------------------------------------
 // Queue of jobs to run on the GUI thread.
 //-----------------------------------------------------------------------------
+enum JobState { QUEUED, RUNNING, ABANDONED };
+
 struct Job {
     std::function<json()>   work;
     std::promise<json>      result;
-    std::atomic<bool>       abandoned{false};
+    std::atomic<int>        state{QUEUED};
 };
 
 static std::mutex                           queueMutex;
@@ -44,6 +46,13 @@ static std::unique_ptr<HttpServer>          httpServer;
 static std::string                          sessionId;
 
 static void Pump() {
+    // Don't run tools inside a modal dialog's nested event loop: the code
+    // that opened the dialog may hold pointers into the sketch that a tool
+    // would invalidate. Try again once the dialog is closed.
+    if(Platform::modalDepth > 0) {
+        pumpTimer->RunAfter(PUMP_PERIOD_MS);
+        return;
+    }
     for(;;) {
         std::shared_ptr<Job> job;
         {
@@ -54,7 +63,8 @@ static void Pump() {
         }
         // If the client already gave up waiting, don't run it: it would
         // change the model behind the client's back.
-        if(job->abandoned) continue;
+        int expected = QUEUED;
+        if(!job->state.compare_exchange_strong(expected, RUNNING)) continue;
         try {
             job->result.set_value(job->work());
         } catch(...) {
@@ -74,9 +84,18 @@ static json RunOnGuiThread(std::function<json()> work) {
         queue.push_back(job);
     }
     if(future.wait_for(std::chrono::seconds(CALL_TIMEOUT_S)) != std::future_status::ready) {
-        job->abandoned = true;
-        throw ToolError("SolveSpace UI is busy (is a modal dialog open?); "
-                        "the call was not executed. Close the dialog and retry.");
+        int expected = QUEUED;
+        if(job->state.compare_exchange_strong(expected, ABANDONED)) {
+            throw ToolError("SolveSpace UI is busy (is a modal dialog open?); "
+                            "the call was not executed. Close the dialog and retry.");
+        }
+        // It started running; it's just slow. Wait for it to finish.
+        if(future.wait_for(std::chrono::seconds(10 * CALL_TIMEOUT_S)) !=
+           std::future_status::ready) {
+            throw ToolError("The call is still running in SolveSpace; its outcome is "
+                            "unknown. Check the model with get_model_summary before "
+                            "retrying.");
+        }
     }
     return future.get();
 }
@@ -98,8 +117,20 @@ static json CallToolOnGuiThread(const std::string &name, const json &args) {
 
     // If the user is half-way through drawing something, abandon it; the
     // pending operation would otherwise interfere with the tool.
-    bool hadPending = SS.GW.pending.operation != GraphicsWindow::Pending::NONE;
-    if(hadPending) SS.GW.ClearPending();
+    using Pending = GraphicsWindow::Pending;
+    Pending op = SS.GW.pending.operation;
+    bool hadPending = op != Pending::NONE;
+    if(hadPending) {
+        // As pressing Esc does: these operations have already added the
+        // geometry being drawn, which an undo removes.
+        SS.GW.ClearSuper();
+        if(op == Pending::DRAGGING_NEW_POINT || op == Pending::DRAGGING_NEW_LINE_POINT ||
+           op == Pending::DRAGGING_NEW_ARC_POINT || op == Pending::DRAGGING_NEW_RADIUS) {
+            SS.UndoUndo();
+            SS.UndoClearStack(&SS.redo);
+            SS.UndoEnableMenus();
+        }
+    }
 
     ToolResult result;
     std::string failure;
@@ -191,7 +222,7 @@ static json HandleToolsList() {
 
 // Returns a JSON-RPC response, or null for notifications.
 static json HandleMessage(const json &msg) {
-    if(!msg.is_object() || msg.value("jsonrpc", "") != "2.0" ||
+    if(!msg.is_object() || !msg.contains("jsonrpc") || msg["jsonrpc"] != "2.0" ||
        !msg.contains("method") || !msg["method"].is_string()) {
         return RpcError(msg.is_object() && msg.contains("id") ? msg["id"] : json(),
                         -32600, "Invalid Request");
@@ -291,7 +322,7 @@ static HttpResponse HandleHttp(const HttpRequest &req) {
     }
 
     json reply = HandleMessage(msg);
-    if(msg.is_object() && msg.value("method", "") == "initialize") {
+    if(msg.is_object() && msg.contains("method") && msg["method"] == "initialize") {
         resp.headers["Mcp-Session-Id"] = sessionId;
     }
     if(reply.is_null()) {
@@ -310,6 +341,10 @@ bool StartServer(uint16_t port) {
     char buf[33];
     snprintf(buf, sizeof(buf), "%08x%08x%08x%08x", rd(), rd(), rd(), rd());
     sessionId = buf;
+
+    // Build the tool registry now, on the GUI thread, before any HTTP thread
+    // can read it.
+    GetTools();
 
     httpServer.reset(new HttpServer());
     std::string error;

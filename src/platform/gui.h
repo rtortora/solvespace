@@ -138,6 +138,16 @@ typedef std::shared_ptr<Settings> SettingsRef;
 
 SettingsRef GetSettings();
 
+// How many modal dialogs (or file dialogs) are currently running a nested
+// event loop. Code driven by timers can check this to avoid running inside
+// a modal loop, where the code that opened the dialog may hold pointers
+// into the sketch. Only touched on the GUI thread.
+extern int modalDepth;
+struct ModalScope {
+    ModalScope()  { modalDepth++; }
+    ~ModalScope() { modalDepth--; }
+};
+
 // A native single-shot timer.
 class Timer {
 public:

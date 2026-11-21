@@ -139,20 +139,22 @@ There are two patterns. Each tool uses whichever one is safer for it.
 extlib/nlohmann/json.hpp           vendored single header (MIT), C++11-compatible;
                                    added to THIRD_PARTIES.txt
 src/mcp/httpserver.{h,cpp}         minimal HTTP/1.1 server: POSIX sockets + Winsock,
-                                   Content-Length bodies only, keep-alive optional
-src/mcp/mcpserver.{h,cpp}          JSON-RPC routing, initialize/ping/tools/*,
-                                   session id, Origin check, job queue + pump
-src/mcp/mcpcontext.{h,cpp}         McpCallScope, handle encode/decode, error helpers,
-                                   JSON <-> Vector/Quaternion
-src/mcp/tools.h                    ToolRegistry: name, description, input JSON schema,
-                                   handler(json args, McpResult&)
-src/mcp/tools_model.cpp            read-back tools
-src/mcp/tools_sketch.cpp           entity creation
-src/mcp/tools_constraint.cpp
-src/mcp/tools_group.cpp            workplanes, 3D sketches, extrude, lathe, ...
-src/mcp/tools_view.cpp             camera, screenshot, visibility
-src/mcp/tools_file.cpp             new/open/save/export
-test/mcp/mcp_smoke.py              stdlib-only client used by the test plan
+                                   Content-Length bodies only, keep-alive
+src/mcp/mcp.h, mcpserver.cpp       JSON-RPC routing, initialize/ping/tools/*,
+                                   session id, Origin check, job queue + pump,
+                                   per-call scope (message capture, UI refresh)
+src/mcp/mcptools.h                 shared helpers: handles, argument parsing,
+tools_common.cpp                   JSON for groups/entities/constraints,
+                                   Transaction (one undo step, rollback on failure),
+                                   tool registry
+src/mcp/tools_model.cpp            read-back tools, screenshot, server instructions
+src/mcp/tools_document.cpp         new/open/save, undo/redo, groups, delete
+src/mcp/tools_sketch.cpp           sketch groups and entity creation
+src/mcp/tools_constraint.cpp       constraints, solve status, parameters, relations
+src/mcp/tools_ops.cpp              extrude, lathe, revolve, helix, rotate, translate, link
+test/mcp/mcp_client.py             stdlib-only MCP client
+test/mcp/mcp_smoke.py              milestone 0 smoke test
+test/mcp/mcp_tests.py              end-to-end tests for milestones 0-5
 ```
 
 The code is linked **only into the `solvespace` GUI target**
@@ -170,10 +172,8 @@ out to be fragile, it can be replaced later without touching anything above it.
 
 ## 2. Milestone 0 — Vertical slice (stop here for manual testing)
 
-**Status: implemented and awaiting manual testing.** Code is in `src/mcp/` and
-the hooks are in `src/util.cpp` (message capture) and
-`src/platform/entrygui.cpp` (startup). `test/mcp/mcp_smoke.py` passes
-against a live GUI.
+**Status: done and tested by hand with Claude Code.** The hooks are in
+`src/util.cpp` (message capture) and `src/platform/entrygui.cpp` (startup).
 
 **Scope: the infrastructure from §1, kept minimal, plus five tools.**
 
@@ -223,6 +223,12 @@ Each milestone ships on its own and gets a short manual check plus smoke-script
 coverage. The numbering is a suggested order, not a strict dependency chain,
 except where noted.
 
+**Progress:** milestones 2–5 were built before milestone 1, so that Claude can
+model a real part sooner. All four are done. `test/mcp/mcp_tests.py` covers
+them against a live GUI (run it on a spare port, e.g.
+`SOLVESPACE_MCP_PORT=47475`). Where the result differs from the plan below,
+the milestone has an **As built** note. Milestone 1 is next, then 6–8.
+
 ### Milestone 1 — Hardening and settings
 
 * A Configuration screen section: enable MCP, port, optional token, and a
@@ -251,6 +257,13 @@ covers (a). Milestone 6 covers (b) and (c).
   name?, color?, opacity?, combine?: "union"|"difference"|"intersection"|"assemble",
   suppress?, relax_constraints?, ...}`
 * `delete_group {group}`, `undo`, `redo`.
+
+**As built:** there is no `list_groups` or `get_document_info`, because
+`get_model_summary` covers both. A general `delete {handles}` tool for
+geometry and constraints was added here instead of in Milestone 3/4. Every
+modifying tool is wrapped in a `Transaction`: the whole call is one undo step
+(extra steps recorded by GUI functions are merged into it), and a call that
+fails rolls back.
 
 ### Milestone 3 — Sketch entities (all request types)
 
@@ -284,6 +297,16 @@ Vector b)`) that both the mouse path and MCP call. This is the change most
 likely to cause regressions in this plan. It is tested against the existing
 `test/request/*` fixtures.
 
+**As built:** the mouse code was **not** refactored. The tools repeat its
+point placement instead, which keeps the GUI's drawing code untouched and
+removes the main regression risk. Other differences from the plan:
+* The tangent arc tool is called `fillet {point, radius?}`. SolveSpace's
+  tangent arc tool is approximate, so the radius comes out within about 0.1%.
+* Sketching on a face is `create_workplane_sketch {point, plane}`: a vertex of
+  the face plus the reference plane the face is parallel to. `Group::MenuGroup`
+  has no face case.
+* `sketch_cubic` takes on-curve points, with optional end tangent controls.
+
 ### Milestone 4 — Constraints
 
 * `add_constraint {type, points?: [...], entities?: [...], value?, reference?}`.
@@ -307,6 +330,15 @@ likely to cause regressions in this plan. It is tested against the existing
   `Command::RELATION`. Tools: `list_parameters`, `set_parameter`,
   `add_relation {expression}`.
 
+**As built:** `where_dragged` is called `lock`. `other_angle` is a
+`supplementary` flag on `add_constraint`. Comments have their own tool,
+`add_comment`. Constraints are deleted with `delete`. A change that stops a
+sketch that solved before from solving is rolled back, and the error lists the
+conflicting constraints. A dimension that would be redundant becomes a
+reference dimension, as in the GUI. Values go through the GUI's label editor
+with units forced to mm, so expressions and new named parameters work exactly
+as when typing a value in the GUI.
+
 ### Milestone 5 — 3D operations
 
 All of these create groups by driving `Group::MenuGroup` through the selection,
@@ -323,6 +355,18 @@ through constraints.
 * `link_file {path, ...}` (assemblies)
 * `list_faces {group?}`: face entities with centroid and normal, so a
   later tool can say "sketch on the top face".
+
+**As built:** faces are listed with `list_entities {kind: "faces"}`.
+* `extrude` adds a distance constraint for the depth by default, so the group
+  is fully constrained. Skewed extrusions are switched on afterwards with
+  `set_group_properties`.
+* The revolve and helix angles are set numerically but not constrained, so
+  those groups keep 1 degree of freedom.
+* `rotate_copy` and `translate_copy` take no `combine` option, because
+  SolveSpace makes them inherit it from the source group.
+* Parameter scaling, from `Group::Generate`: extrude depth = 2·|vector|;
+  translate step = 2·params; rotate/revolve angle = 4·param3; helix travel =
+  2·param7. Each of these is checked by measuring in `mcp_tests.py`.
 
 ### Milestone 6 — View, navigation, screenshots and display visibility
 

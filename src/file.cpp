@@ -1251,11 +1251,17 @@ static Platform::MessageDialog::Response LocateImportedFile(const Platform::Path
     Platform::MessageDialogRef dialog = CreateMessageDialog(SS.GW.window);
 
     using Platform::MessageDialog;
-    if(!dialog) {
-        // When running the headless CLI version no dialog is possible, so
-        // decline to locate the file.
+    if(!dialog || activeMessageCapture) {
+        // When running the headless CLI version no dialog is possible, and
+        // while a remote (MCP) client is driving the GUI we mustn't open one;
+        // so decline to locate the file.
         dbp("The linked file '%s' is not present; continuing without it.",
             filename.raw.c_str());
+        if(activeMessageCapture) {
+            activeMessageCapture->messages.push_back(
+                "The linked file '" + filename.raw + "' is not present; continuing "
+                "without it.");
+        }
         return MessageDialog::Response::NO;
     }
 

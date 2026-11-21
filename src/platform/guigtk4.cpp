@@ -1401,6 +1401,7 @@ public:
     }
 
     Response RunModal() override {
+        ModalScope modalScope;
         auto dialog = Gtk::AlertDialog::create();
         dialog->set_message(message);
         dialog->set_detail(description);
@@ -1451,6 +1452,7 @@ public:
     }
 
     void ShowModal() override {
+        ModalScope modalScope;
         Response response = RunModal();
         if(onResponse) {
             onResponse(response);
@@ -1566,6 +1568,7 @@ public:
     }
 
     bool RunModal() override {
+        ModalScope modalScope;
         bool accepted = false;
         auto loop = Glib::MainLoop::create();
 
