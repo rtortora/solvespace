@@ -271,6 +271,23 @@ if(ENABLE_GUI)
     add_dependencies(solvespace
         resources)
 
+    # MCP server (needs Cairo for offscreen screenshots).
+    if(ENABLE_MCP AND NOT USE_QT_GUI AND NOT EMSCRIPTEN)
+        target_sources(solvespace PRIVATE
+            mcp/httpserver.cpp
+            mcp/mcpserver.cpp
+            mcp/mcptools.cpp
+            render/rendercairo.cpp)
+        target_include_directories(solvespace SYSTEM PRIVATE
+            ${CMAKE_SOURCE_DIR}/extlib)
+        target_compile_definitions(solvespace PRIVATE HAVE_MCP)
+        find_package(Threads REQUIRED)
+        target_link_libraries(solvespace PRIVATE Threads::Threads)
+        if(WIN32)
+            target_link_libraries(solvespace PRIVATE ws2_32)
+        endif()
+    endif()
+
     target_link_libraries(solvespace
         PRIVATE
         solvespace-core

@@ -110,6 +110,8 @@ void MultMatrix(double *mata, double *matb, double *matr) {
 // Format the string for our message box appropriately, and then display
 // that string.
 //-----------------------------------------------------------------------------
+MessageCapture *activeMessageCapture = NULL;
+
 static void MessageBox(const char *fmt, va_list va, bool error,
                        std::function<void()> onDismiss = std::function<void()>())
 {
@@ -124,6 +126,15 @@ static void MessageBox(const char *fmt, va_list va, bool error,
     text.resize(size);
 
     vsnprintf(&text[0], size + 1, fmt, va);
+
+    if(activeMessageCapture) {
+        (error ? activeMessageCapture->errors
+               : activeMessageCapture->messages).push_back(text);
+        if(onDismiss) {
+            onDismiss();
+        }
+        return;
+    }
 
     // Split message text using a heuristic for better presentation.
     size_t separatorAt = 0;

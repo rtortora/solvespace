@@ -68,6 +68,8 @@ set(ENABLE_TESTS      ${INCLUDE_NATIVE_COMPONENTS} CACHE BOOL
     "Whether the test suite will be built and run")
 set(ENABLE_COVERAGE   OFF CACHE BOOL
     "Whether code coverage information will be collected")
+set(ENABLE_MCP        ${INCLUDE_NATIVE_COMPONENTS} CACHE BOOL
+    "Whether the GUI can run an MCP server for local AI clients")
 set(ENABLE_SANITIZERS OFF CACHE BOOL
     "Whether to enable Clang's AddressSanitizer and UndefinedBehaviorSanitizer")
 set(ENABLE_OPENMP     OFF CACHE BOOL

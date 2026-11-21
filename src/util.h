@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <functional>
 #include <string>
+#include <vector>
 
 // The few floating-point equality comparisons in SolveSpace have been
 // carefully considered, so we disable the -Wfloat-equal warning for them
@@ -99,6 +100,16 @@ int64_t GetMilliseconds();
 void Message(const char *fmt, ...);
 void MessageAndRun(std::function<void()> onDismiss, const char *fmt, ...);
 void Error(const char *fmt, ...);
+
+// While set (by the MCP server, during a tool call), Error() and Message()
+// append their text here instead of showing a modal dialog, so that a remote
+// client gets the message back and the GUI is never blocked by a dialog that
+// only a human could dismiss. Only touched on the GUI thread.
+struct MessageCapture {
+    std::vector<std::string> errors;
+    std::vector<std::string> messages;
+};
+extern MessageCapture *activeMessageCapture;
 
 } // namespace SolveSpace
 
