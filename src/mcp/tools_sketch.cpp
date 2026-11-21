@@ -51,6 +51,105 @@ static void FinishSketchResult(ToolResult *res, const json &requests) {
     res->structured["solve"] = SolveStatus(SS.GW.activeGroup);
 }
 
+static json OneRequest(hRequest hr, const json &args) {
+    return json::array({RequestJson(hr, Verbose(args))});
+}
+
+//-----------------------------------------------------------------------------
+// Constraining what was drawn (constrain=true)
+//-----------------------------------------------------------------------------
+// Adds a dimension with its current value (so nothing moves), in the active
+// workplane. labelOffset places its label, as dragging it in the GUI would.
+static hConstraint AddDimension(Constraint::Type type, hEntity ptA, hEntity ptB,
+                                hEntity entityA, hEntity entityB = Entity::NO_ENTITY,
+                                Vector labelOffset = Vector::From(0, 0, 0)) {
+    Constraint c = {};
+    c.group     = SS.GW.activeGroup;
+    c.workplane = SS.GW.ActiveWorkplane();
+    c.type      = type;
+    c.ptA       = ptA;
+    c.ptB       = ptB;
+    c.entityA   = entityA;
+    c.entityB   = entityB;
+    c.valA      = 0;
+    c.disp.offset = labelOffset;
+    c.ModifyToSatisfy(&SK);
+    return Constraint::AddConstraint(&c, /*rememberForUndo=*/false);
+}
+
+// A label offset of about 30 pixels at the current zoom, in direction d.
+static Vector LabelOffset(Vector d) {
+    if(d.Magnitude() < LENGTH_EPS) return Vector::From(0, 0, 0);
+    return d.WithMagnitude(30 / SS.GW.scale);
+}
+
+static hEntity ActiveWorkplaneOrigin() {
+    return SK.GetEntity(SS.GW.ActiveWorkplane())->point[0];
+}
+
+// A reference plane's normal along +-dir (a vector entity to measure
+// projected distances along), or none.
+static hEntity ReferenceVectorAlong(Vector dir) {
+    for(hRequest hr : { Request::HREQUEST_REFERENCE_XY, Request::HREQUEST_REFERENCE_YZ,
+                        Request::HREQUEST_REFERENCE_ZX }) {
+        Entity *wp = SK.GetEntity(hr.entity(0));
+        if(fabs(fabs(wp->Normal()->NormalN().Dot(dir)) - 1) < 1e-9) return wp->normal;
+    }
+    return Entity::NO_ENTITY;
+}
+
+// Fixes a point in the active workplane: coincident with the workplane's
+// origin if it's there, otherwise by its distances from the origin along
+// the workplane's u and v axes, measured along the vector entities uVec and
+// vVec (by default the reference axes, if the workplane is aligned with
+// them). Returns false if there was nothing to measure along.
+static bool AnchorPoint(hEntity pt, json *dims,
+                        hEntity uVec = Entity::NO_ENTITY, hEntity vVec = Entity::NO_ENTITY) {
+    Frame f = FrameOf(SS.GW.ActiveWorkplane());
+    Vector p = SK.GetEntity(pt)->PointGetNum();
+    hEntity origin = ActiveWorkplaneOrigin();
+    if(fabs(f.U(p)) < LENGTH_EPS && fabs(f.V(p)) < LENGTH_EPS) {
+        (*dims)["at_origin"] = H(Constraint::ConstrainCoincident(origin, pt));
+        return true;
+    }
+    if(!uVec.v) uVec = ReferenceVectorAlong(f.u);
+    if(!vVec.v) vVec = ReferenceVectorAlong(f.v);
+    if(!uVec.v || !vVec.v) return false;
+    (*dims)["u"] = H(AddDimension(Constraint::Type::PROJ_PT_DISTANCE, origin, pt, uVec,
+                                  Entity::NO_ENTITY, LabelOffset(f.v.ScaledBy(-1))));
+    (*dims)["v"] = H(AddDimension(Constraint::Type::PROJ_PT_DISTANCE, origin, pt, vVec,
+                                  Entity::NO_ENTITY, LabelOffset(f.u.ScaledBy(-1))));
+    return true;
+}
+
+static const char *NOT_ANCHORED =
+    "The position isn't constrained: the workplane's axes aren't parallel to the "
+    "reference axes, so there is nothing to measure it along. Constrain it with "
+    "add_constraint.";
+
+// After constrain=true: the sketch must still solve, if it did before.
+static void CheckConstrained(bool solvedBefore) {
+    Regenerate();
+    Group *g = SK.GetGroup(SS.GW.activeGroup);
+    if(solvedBefore && g->solved.how != SolveResult::OKAY) {
+        throw ToolError("Constraining the new geometry made the sketch fail to solve (" +
+                        SolveStatus(g->h).dump() + "); nothing was added. Draw it with "
+                        "constrain=false and add the constraints you need.");
+    }
+}
+
+// Whether constrain=true was given; *solvedBefore is whether the sketch
+// solves before anything is added.
+static bool WantConstrain(const json &args, bool *solvedBefore) {
+    bool c = args.value("constrain", false);
+    if(c && !SS.GW.LockedInWorkplane()) {
+        throw ToolError("constrain=true needs a workplane sketch; in a 3D sketch add "
+                        "constraints with add_constraint.");
+    }
+    *solvedBefore = SK.GetGroup(SS.GW.activeGroup)->solved.how == SolveResult::OKAY;
+    return c;
+}
+
 //-----------------------------------------------------------------------------
 // create_workplane_sketch / create_3d_sketch
 //-----------------------------------------------------------------------------
@@ -68,7 +167,191 @@ static hRequest ReferencePlane(const std::string &plane) {
     throw ToolError("plane must be one of XY, YZ, ZX");
 }
 
+static Quaternion ReferencePlaneQ(const std::string &plane) {
+    Frame f = FrameOf(ReferencePlane(plane).entity(0));
+    return Quaternion::From(f.u, f.v);
+}
+
+// The reference plane whose normal is along axis k (0 x: YZ, 1 y: ZX, 2 z: XY).
+static hEntity ReferencePlaneNormalTo(int k) {
+    static const hRequest planes[3] = { Request::HREQUEST_REFERENCE_YZ,
+        Request::HREQUEST_REFERENCE_ZX, Request::HREQUEST_REFERENCE_XY };
+    return planes[k].entity(0);
+}
+
+static double Component(Vector v, int k) { return k == 0 ? v.x : (k == 1 ? v.y : v.z); }
+
+// Inserts, after the active group, a hidden 3D sketch holding a datum point
+// at p, fixed by its distances from the reference planes (or lying in a
+// plane, where the coordinate is 0); skipAxis (0..2, or -1) is left free
+// for onFace (a face the point lies on) to fix. The distances can be edited
+// later, and anything placed on the point follows.
+static hEntity MakeDatumPoint(Vector p, int skipAxis, hEntity onFace, const std::string &name,
+                              json *info) {
+    SS.GW.ClearSelection();
+    hGroup before = SS.GW.activeGroup;
+    Group::MenuGroup(Command::GROUP_3D);
+    ThrowIfErrors();
+    if(SS.GW.activeGroup == before) throw ToolError("The datum group was not created.");
+    Group *g = SK.GetGroup(SS.GW.activeGroup);
+    g->name    = name;
+    g->visible = false;
+    hGroup hg  = g->h;
+    hRequest hr = NewRequest(Request::Type::DATUM_POINT, false);
+    hEntity pt  = hr.entity(0);
+    SK.GetEntity(pt)->PointForceTo(p);
+    json dims = json::object();
+    static const char *axisName[3] = { "x", "y", "z" };
+    for(int k = 0; k < 3; k++) {
+        if(k == skipAxis) continue;
+        hEntity plane = ReferencePlaneNormalTo(k);
+        if(fabs(Component(p, k)) < LENGTH_EPS) {
+            Constraint::Constrain(Constraint::Type::PT_IN_PLANE, pt, Entity::NO_ENTITY, plane);
+        } else {
+            dims[axisName[k]] = H(AddDimension(Constraint::Type::PT_PLANE_DISTANCE, pt,
+                                               Entity::NO_ENTITY, plane));
+        }
+    }
+    if(onFace.v) {
+        Constraint::Constrain(Constraint::Type::PT_ON_FACE, pt, Entity::NO_ENTITY, onFace);
+    }
+    Regenerate();
+    g = SK.GetGroup(hg);
+    if(g->solved.how != SolveResult::OKAY || g->solved.dof != 0) {
+        throw ToolError("Couldn't fix the workplane's origin (" + SolveStatus(hg).dump() + ")");
+    }
+    (*info)["datum_group"] = H(hg);
+    (*info)["datum_point"] = H(pt);
+    if(!dims.empty()) (*info)["origin_constraints"] = dims;
+    return pt;
+}
+
+// Inserts a workplane sketch after the active group, through the point,
+// with the orientation q.
+static void MakeWorkplaneGroup(hEntity origin, Quaternion q) {
+    hGroup before = SS.GW.activeGroup;
+    SelectOnly(Handles{{origin}, {}, {}, {}});
+    Group::MenuGroup(Command::GROUP_WRKPL);
+    SS.GW.ClearSelection();
+    ThrowIfErrors();
+    if(SS.GW.activeGroup == before) throw ToolError("The workplane sketch was not created.");
+    Group *g = SK.GetGroup(SS.GW.activeGroup);
+    // MenuGroup took the orientation from the view; set the one wanted.
+    g->subtype  = Group::Subtype::WORKPLANE_BY_POINT_ORTHO;
+    g->predef.q = q;
+    SS.MarkGroupDirty(g->h);
+    Regenerate();
+    SS.GW.AnimateOntoWorkplane();
+}
+
+// A frame for sketching on a face whose outward normal is n: Z up for
+// vertical faces, X to the right otherwise.
+static Quaternion FaceQuaternion(Vector n) {
+    Vector Z = Vector::From(0, 0, 1), X = Vector::From(1, 0, 0);
+    Vector u, v;
+    if(fabs(n.Dot(Z)) < 0.99) {
+        v = Z.Minus(n.ScaledBy(n.Dot(Z))).WithMagnitude(1);
+        u = v.Cross(n).WithMagnitude(1);
+    } else {
+        u = X.Minus(n.ScaledBy(n.Dot(X))).WithMagnitude(1);
+        v = n.Cross(u).WithMagnitude(1);
+    }
+    return Quaternion::From(u, v);
+}
+
+static void SketchResult(ToolResult *res, const json &info) {
+    Group *g = SK.GetGroup(SS.GW.activeGroup);
+    res->structured = {
+        {"group", H(g->h)}, {"name", g->name},
+        {"workplane", ActiveWorkplaneJson()},
+        {"solve", SolveStatus(g->h)},
+    };
+    for(auto &it : info.items()) res->structured[it.key()] = it.value();
+}
+
+static void SketchOnFace(const json &args, ToolResult *res) {
+    hEntity hf = ParseEntity(args["face"]);
+    Entity *face = SK.GetEntity(hf);
+    if(!face->IsFace()) throw ToolError(H(hf) + " isn't a face (find_faces lists faces)");
+    FaceInfo fi = GetFaceInfo(hf);
+    Vector n = fi.normal;
+    json info = json::object();
+    info["face"] = H(hf);
+    if(!fi.onSurface) {
+        info["note"] = "The face isn't on the solid's surface any more, so its outward "
+                       "direction is unknown; the normal is the face entity's own.";
+    }
+    int axis = -1;
+    for(int k = 0; k < 3; k++) {
+        if(fabs(fabs(Component(n, k)) - 1) < 1e-9) axis = k;
+    }
+    Transaction t;
+    if(axis >= 0) {
+        // Put the origin where the face's plane meets the axis through the
+        // model's origin, so the sketch's [u, v] are model coordinates, and
+        // keep it on the face if the solid changes.
+        Vector p = n.ScaledBy(fi.point.Dot(n));
+        hEntity pt = MakeDatumPoint(p, axis, hf,
+                                    args.value("name", std::string("on-face")) + "-origin",
+                                    &info);
+        MakeWorkplaneGroup(pt, FaceQuaternion(n));
+    } else {
+        if(!face->point[0].v) throw ToolError("This face has no point to put a workplane on");
+        MakeWorkplaneGroup(face->point[0], FaceQuaternion(n));
+        info["note"] = "The face isn't parallel to a reference plane, so the workplane's "
+                       "origin is a vertex of the face, and [u, v] are relative to it.";
+    }
+    NameNewGroup(args);
+    t.Commit();
+    SketchResult(res, info);
+}
+
+static void SketchAtOffset(const json &args, ToolResult *res) {
+    std::string plane = args.value("plane", "XY");
+    Quaternion q = ReferencePlaneQ(plane);
+    Vector n = q.RotationN();
+    Vector p = args.contains("origin") ? Vec3(args["origin"], "origin") : Vector::From(0, 0, 0);
+    double offset = args.contains("offset") ? Num(args["offset"], "offset") : 0;
+    p = p.Plus(n.ScaledBy(offset));
+    json info = json::object();
+    Transaction t;
+    if(p.Magnitude() < LENGTH_EPS) {
+        // On the reference plane itself.
+        SelectOnly(Handles{{ReferencePlane(plane).entity(0)}, {}, {}, {}});
+        hGroup before = SS.GW.activeGroup;
+        Group::MenuGroup(Command::GROUP_WRKPL);
+        SS.GW.ClearSelection();
+        ThrowIfErrors();
+        if(SS.GW.activeGroup == before) throw ToolError("The workplane sketch was not created.");
+        Regenerate();
+    } else {
+        std::string name = args.value("name", std::string("sketch")) + "-origin";
+        hEntity pt = MakeDatumPoint(p, -1, Entity::NO_ENTITY, name, &info);
+        MakeWorkplaneGroup(pt, q);
+        // The constraint that sets the distance along the plane's normal.
+        int k = (plane == "XY" || plane == "xy") ? 2 : (plane == "YZ" || plane == "yz") ? 0 : 1;
+        static const char *axisName[3] = { "x", "y", "z" };
+        if(info.contains("origin_constraints") && info["origin_constraints"].contains(axisName[k])) {
+            info["offset_constraint"] = info["origin_constraints"][axisName[k]];
+        }
+    }
+    NameNewGroup(args);
+    t.Commit();
+    SketchResult(res, info);
+}
+
 static void CreateWorkplaneSketch(const json &args, ToolResult *res) {
+    if(args.contains("face")) {
+        SketchOnFace(args, res);
+        return;
+    }
+    if(args.contains("offset") || args.contains("origin")) {
+        if(args.contains("point") || args.contains("workplane")) {
+            throw ToolError("offset/origin can't be combined with point or workplane");
+        }
+        SketchAtOffset(args, res);
+        return;
+    }
     Handles sel;
     std::string plane = args.value("plane", "XY");
     // While creating a workplane through a point, Group::MenuGroup picks the
@@ -115,13 +398,7 @@ static void CreateWorkplaneSketch(const json &args, ToolResult *res) {
     NameNewGroup(args);
     Regenerate();
     t.Commit();
-
-    Group *g = SK.GetGroup(SS.GW.activeGroup);
-    res->structured = {
-        {"group", H(g->h)}, {"name", g->name},
-        {"workplane", ActiveWorkplaneJson()},
-        {"solve", SolveStatus(g->h)},
-    };
+    SketchResult(res, json::object());
 }
 
 static void Create3dSketch(const json &args, ToolResult *res) {
@@ -149,12 +426,16 @@ static void SketchPointTool(const json &args, ToolResult *res) {
     SK.GetEntity(hr.entity(0))->PointForceTo(p);
     Regenerate();
     t.Commit();
-    FinishSketchResult(res, json::array({RequestJson(hr)}));
+    FinishSketchResult(res, OneRequest(hr, args));
 }
 
 //-----------------------------------------------------------------------------
 // sketch_line (polyline)
 //-----------------------------------------------------------------------------
+static bool AlongAxis(Vector d, Vector axis) {
+    return fabs(fabs(d.WithMagnitude(1).Dot(axis)) - 1) < 1e-9;
+}
+
 static void SketchLine(const json &args, ToolResult *res) {
     RequireSketchGroup();
     const json &pts = args.value("points", json());
@@ -162,6 +443,8 @@ static void SketchLine(const json &args, ToolResult *res) {
     bool closed = args.value("closed", false);
     if(closed && pts.size() < 3) throw ToolError("A closed polyline needs at least 3 points");
     bool construction = args.value("construction", false);
+    bool solvedBefore;
+    bool constrain = WantConstrain(args, &solvedBefore);
 
     std::vector<Vector> p;
     for(size_t i = 0; i < pts.size(); i++) {
@@ -191,12 +474,72 @@ static void SketchLine(const json &args, ToolResult *res) {
     if(closed) {
         Constraint::ConstrainCoincident(lines.back().entity(2), lines.front().entity(1));
     }
+
+    json dims = json::object();
+    std::string note;
+    if(constrain) {
+        Frame f = FrameOf(SS.GW.ActiveWorkplane());
+        // Each segment gets a direction and a length, except the one that
+        // closes a polygon, which follows from the others; the first point
+        // is anchored.
+        size_t m = closed ? n - 1 : n;
+        hEntity uVec = Entity::NO_ENTITY, vVec = Entity::NO_ENTITY;
+        for(size_t i = 0; i < n; i++) {
+            Vector d = p[(i + 1) % p.size()].Minus(p[i]);
+            if(AlongAxis(d, f.u) && !uVec.v) uVec = lines[i].entity(0);
+            if(AlongAxis(d, f.v) && !vVec.v) vVec = lines[i].entity(0);
+        }
+        if(!uVec.v) uVec = ReferenceVectorAlong(f.u);
+        if(!vVec.v) vVec = ReferenceVectorAlong(f.v);
+        json lengths = json::array(), dirs = json::array();
+        for(size_t i = 0; i < m; i++) {
+            hEntity ln = lines[i].entity(0);
+            Vector a = p[i], b = p[(i + 1) % p.size()], d = b.Minus(a);
+            Vector side = f.n.Cross(d);
+            if(AlongAxis(d, f.u) || AlongAxis(d, f.v)) {
+                dirs.push_back(H(Constraint::Constrain(
+                    AlongAxis(d, f.u) ? Constraint::Type::HORIZONTAL : Constraint::Type::VERTICAL,
+                    Entity::NO_ENTITY, Entity::NO_ENTITY, ln)));
+            } else if(i > 0) {
+                // An angle to the previous segment; parallel if they're in
+                // line (an angle of 0 or 180 degrees doesn't solve well).
+                Vector prev = p[i].Minus(p[i - 1]);
+                if(AlongAxis(d, prev.WithMagnitude(1))) {
+                    dirs.push_back(H(Constraint::Constrain(Constraint::Type::PARALLEL,
+                        Entity::NO_ENTITY, Entity::NO_ENTITY, lines[i - 1].entity(0), ln)));
+                } else {
+                    dirs.push_back(H(AddDimension(Constraint::Type::ANGLE, Entity::NO_ENTITY,
+                        Entity::NO_ENTITY, lines[i - 1].entity(0), ln)));
+                }
+            } else if(uVec.v && vVec.v) {
+                // The first segment, at an angle: fix its end by how far it
+                // runs along u and v instead.
+                dims["first_run_u"] = H(AddDimension(Constraint::Type::PROJ_PT_DISTANCE,
+                    lines[0].entity(1), lines[0].entity(2), uVec));
+                dims["first_run_v"] = H(AddDimension(Constraint::Type::PROJ_PT_DISTANCE,
+                    lines[0].entity(1), lines[0].entity(2), vVec));
+                continue;
+            } else {
+                note = "The first segment's direction isn't constrained (it is at an angle, "
+                       "in a workplane not aligned with the reference axes).";
+            }
+            lengths.push_back(H(AddDimension(Constraint::Type::PT_PT_DISTANCE,
+                lines[i].entity(1), lines[i].entity(2), Entity::NO_ENTITY, Entity::NO_ENTITY,
+                LabelOffset(side))));
+        }
+        dims["lengths"] = lengths;
+        if(!dirs.empty()) dims["directions"] = dirs;
+        if(!AnchorPoint(lines[0].entity(1), &dims, uVec, vVec)) note = NOT_ANCHORED;
+        CheckConstrained(solvedBefore);
+    }
     Regenerate();
     t.Commit();
 
     json reqs = json::array();
-    for(hRequest hr : lines) reqs.push_back(RequestJson(hr));
+    for(hRequest hr : lines) reqs.push_back(RequestJson(hr, Verbose(args)));
     FinishSketchResult(res, reqs);
+    if(constrain) res->structured["dimensions"] = dims;
+    if(!note.empty()) res->structured["note"] = note;
 }
 
 //-----------------------------------------------------------------------------
@@ -205,16 +548,33 @@ static void SketchLine(const json &args, ToolResult *res) {
 static void SketchRectangle(const json &args, ToolResult *res) {
     RequireSketchGroup();
     RequireWorkplane("Rectangles");
-    if(!args.contains("corner1") || !args.contains("corner2")) {
-        throw ToolError("corner1 and corner2 are required");
-    }
     double u1, v1, u2, v2;
-    Point2(args["corner1"], "corner1", &u1, &v1);
-    Point2(args["corner2"], "corner2", &u2, &v2);
+    bool centered = args.contains("center");
+    if(centered) {
+        if(args.contains("corner1") || args.contains("corner2")) {
+            throw ToolError("Give corner1 and corner2, or center with width and height");
+        }
+        double cu, cv;
+        Point2(args["center"], "center", &cu, &cv);
+        double w = Num(args.value("width", json()), "width"),
+               h = Num(args.value("height", json()), "height");
+        if(w <= 0 || h <= 0) throw ToolError("width and height must be positive");
+        u1 = cu - w / 2; u2 = cu + w / 2;
+        v1 = cv - h / 2; v2 = cv + h / 2;
+    } else {
+        if(!args.contains("corner1") || !args.contains("corner2")) {
+            throw ToolError("Give corner1 and corner2, or center with width and height");
+        }
+        Point2(args["corner1"], "corner1", &u1, &v1);
+        Point2(args["corner2"], "corner2", &u2, &v2);
+    }
     if(fabs(u1 - u2) < LENGTH_EPS || fabs(v1 - v2) < LENGTH_EPS) {
         throw ToolError("The rectangle has zero width or height.");
     }
     bool construction = args.value("construction", false);
+    bool solvedBefore;
+    bool constrain = WantConstrain(args, &solvedBefore);
+    bool verbose = Verbose(args);
 
     Frame f = FrameOf(SS.GW.ActiveWorkplane());
     Vector c1  = f.To3d(u1, v1), c2  = f.To3d(u2, v2),
@@ -245,34 +605,102 @@ static void SketchRectangle(const json &args, ToolResult *res) {
             (i % 2) ? Constraint::Type::HORIZONTAL : Constraint::Type::VERTICAL,
             Entity::NO_ENTITY, Entity::NO_ENTITY, lns[i].entity(0));
     }
+
+    // Name the sides by where they are: line 3 runs along v1, line 1 along
+    // v2, line 2 along u1, line 0 along u2.
+    bool v1Low = v1 < v2, u1Low = u1 < u2;
+    hRequest bottom = v1Low ? lns[3] : lns[1], top   = v1Low ? lns[1] : lns[3],
+             left   = u1Low ? lns[2] : lns[0], right = u1Low ? lns[0] : lns[2];
+    // Corners, in the order c1, (u2,v1), c2, (u1,v2).
+    hEntity corner[4] = { lns[2].entity(1), lns[3].entity(1), lns[0].entity(1),
+                          lns[1].entity(1) };
+
+    json dims = json::object();
+    std::string note;
+    hEntity centerPt = Entity::NO_ENTITY;
+    if(constrain) {
+        dims["width"] = H(AddDimension(Constraint::Type::PT_PT_DISTANCE,
+            bottom.entity(1), bottom.entity(2), Entity::NO_ENTITY, Entity::NO_ENTITY,
+            LabelOffset(f.v.ScaledBy(-1))));
+        dims["height"] = H(AddDimension(Constraint::Type::PT_PT_DISTANCE,
+            left.entity(1), left.entity(2), Entity::NO_ENTITY, Entity::NO_ENTITY,
+            LabelOffset(f.u.ScaledBy(-1))));
+        hEntity uVec = bottom.entity(0), vVec = left.entity(0);
+        if(centered) {
+            // A construction diagonal, with the centre at its midpoint.
+            hRequest diag = NewRequest(Request::Type::LINE_SEGMENT, true);
+            SK.GetEntity(diag.entity(1))->PointForceTo(c1);
+            SK.GetEntity(diag.entity(2))->PointForceTo(c2);
+            Constraint::ConstrainCoincident(diag.entity(1), corner[0]);
+            Constraint::ConstrainCoincident(diag.entity(2), corner[2]);
+            Vector c = c1.Plus(c2).ScaledBy(0.5);
+            if(fabs(f.U(c)) < LENGTH_EPS && fabs(f.V(c)) < LENGTH_EPS) {
+                dims["at_origin"] = H(Constraint::Constrain(Constraint::Type::AT_MIDPOINT,
+                    ActiveWorkplaneOrigin(), Entity::NO_ENTITY, diag.entity(0)));
+            } else {
+                hRequest hc = NewRequest(Request::Type::DATUM_POINT, true);
+                centerPt = hc.entity(0);
+                SK.GetEntity(centerPt)->PointForceTo(c);
+                Constraint::Constrain(Constraint::Type::AT_MIDPOINT, centerPt,
+                                      Entity::NO_ENTITY, diag.entity(0));
+                AnchorPoint(centerPt, &dims, uVec, vVec);
+            }
+        } else {
+            // Anchor a corner at the origin if there is one, else the
+            // bottom-left one.
+            hEntity anchor = Entity::NO_ENTITY;
+            for(hEntity hp : corner) {
+                Vector q = SK.GetEntity(hp)->PointGetNum();
+                if(fabs(f.U(q)) < LENGTH_EPS && fabs(f.V(q)) < LENGTH_EPS) anchor = hp;
+            }
+            Vector bottomLeft = f.To3d(min(u1, u2), min(v1, v2));
+            for(hEntity hp : corner) {
+                if(!anchor.v && SK.GetEntity(hp)->PointGetNum().Equals(bottomLeft)) anchor = hp;
+            }
+            AnchorPoint(anchor, &dims, uVec, vVec);
+        }
+        CheckConstrained(solvedBefore);
+    }
     Regenerate();
     t.Commit();
 
-    json lines = json::array();
-    for(int i = 0; i < 4; i++) lines.push_back(EntityJson(SK.GetEntity(lns[i].entity(0))));
-    // One point per corner, in the order c1, (u2,v1), c2, (u1,v2).
     json corners = json::array();
-    for(hEntity hp : { lns[2].entity(1), lns[3].entity(1), lns[0].entity(1), lns[1].entity(1) }) {
+    for(hEntity hp : corner) {
         Vector p = SK.GetEntity(hp)->PointGetNum();
-        corners.push_back({{"handle", H(hp)}, {"uv", f.To2d(p)}, {"xyz", Vec(p)}});
+        json cj = {{"handle", H(hp)}, {"uv", Uv(f, p)}};
+        if(verbose) cj["xyz"] = Vec(p);
+        corners.push_back(cj);
     }
-    json constraints = json::array();
-    for(Constraint &c : SK.constraint) {
-        for(int i = 0; i < 4; i++) {
-            if(c.entityA == lns[i].entity(0) || c.ptA.request() == lns[i]) {
-                constraints.push_back(ConstraintJson(&c));
-                break;
-            }
-        }
-    }
-    res->structured = {
+    json &r = res->structured;
+    r = {
         {"group", H(SS.GW.activeGroup)},
         {"requests", {H(lns[0]), H(lns[1]), H(lns[2]), H(lns[3])}},
-        {"lines", lines},
+        {"edges", {{"bottom", H(bottom.entity(0))}, {"right", H(right.entity(0))},
+                   {"top", H(top.entity(0))}, {"left", H(left.entity(0))}}},
         {"corners", corners},
-        {"constraints", constraints},
         {"solve", SolveStatus(SS.GW.activeGroup)},
     };
+    if(constrain) r["dimensions"] = dims;
+    if(centerPt.v) r["center"] = H(centerPt);
+    if(!note.empty()) r["note"] = note;
+    if(verbose) {
+        json lines = json::array();
+        for(int i = 0; i < 4; i++) {
+            lines.push_back(EntityJson(SK.GetEntity(lns[i].entity(0)), true));
+        }
+        json constraints = json::array();
+        for(Constraint &c : SK.constraint) {
+            for(int i = 0; i < 4; i++) {
+                if(c.entityA == lns[i].entity(0) || c.ptA.request() == lns[i] ||
+                   c.ptB.request() == lns[i]) {
+                    constraints.push_back(ConstraintJson(&c));
+                    break;
+                }
+            }
+        }
+        r["lines"] = lines;
+        r["constraints"] = constraints;
+    }
 }
 
 //-----------------------------------------------------------------------------
@@ -281,13 +709,21 @@ static void SketchRectangle(const json &args, ToolResult *res) {
 static void SketchCircle(const json &args, ToolResult *res) {
     RequireSketchGroup();
     Vector c = SketchPoint(args.value("center", json()), "center");
-    double r = Num(args.value("radius", json()), "radius");
+    double r;
+    if(args.contains("diameter")) {
+        if(args.contains("radius")) throw ToolError("Give radius or diameter, not both");
+        r = Num(args["diameter"], "diameter") / 2;
+    } else {
+        r = Num(args.value("radius", json()), "radius");
+    }
     if(r <= 0) throw ToolError("radius must be positive");
     bool inWorkplane = SS.GW.LockedInWorkplane();
     if(inWorkplane && args.contains("normal")) {
         throw ToolError("normal only applies in a 3D sketch; in a workplane the circle "
                         "lies in the workplane");
     }
+    bool solvedBefore;
+    bool constrain = WantConstrain(args, &solvedBefore);
     Transaction t;
     hRequest hr = NewRequest(Request::Type::CIRCLE, args.value("construction", false));
     SK.GetEntity(hr.entity(1))->PointForceTo(c);
@@ -295,9 +731,21 @@ static void SketchCircle(const json &args, ToolResult *res) {
         SK.GetEntity(hr.entity(32))->NormalForceTo(QuaternionForNormal(NormalArg(args, "normal")));
     }
     SK.GetEntity(hr.entity(64))->DistanceForceTo(r);
+    json dims = json::object();
+    bool anchored = true;
+    if(constrain) {
+        Frame f = FrameOf(SS.GW.ActiveWorkplane());
+        dims["diameter"] = H(AddDimension(Constraint::Type::DIAMETER, Entity::NO_ENTITY,
+            Entity::NO_ENTITY, hr.entity(0), Entity::NO_ENTITY,
+            LabelOffset(f.u.Plus(f.v)).ScaledBy(1 + r * SS.GW.scale / 30)));
+        anchored = AnchorPoint(hr.entity(1), &dims);
+        CheckConstrained(solvedBefore);
+    }
     Regenerate();
     t.Commit();
-    FinishSketchResult(res, json::array({RequestJson(hr)}));
+    FinishSketchResult(res, OneRequest(hr, args));
+    if(constrain) res->structured["dimensions"] = dims;
+    if(!anchored) res->structured["note"] = NOT_ANCHORED;
 }
 
 static void SketchArc(const json &args, ToolResult *res) {
@@ -321,7 +769,7 @@ static void SketchArc(const json &args, ToolResult *res) {
     SK.GetEntity(hr.entity(3))->PointForceTo(b);
     Regenerate();
     t.Commit();
-    FinishSketchResult(res, json::array({RequestJson(hr)}));
+    FinishSketchResult(res, OneRequest(hr, args));
 }
 
 //-----------------------------------------------------------------------------
@@ -376,7 +824,7 @@ static void SketchCubic(const json &args, ToolResult *res) {
     SS.MarkGroupDirty(SS.GW.activeGroup);
     Regenerate();
     t.Commit();
-    FinishSketchResult(res, json::array({RequestJson(hr)}));
+    FinishSketchResult(res, OneRequest(hr, args));
 }
 
 //-----------------------------------------------------------------------------
@@ -416,7 +864,7 @@ static void SketchText(const json &args, ToolResult *res) {
     SS.MarkGroupDirty(SS.GW.activeGroup);
     Regenerate();
     t.Commit();
-    FinishSketchResult(res, json::array({RequestJson(hr)}));
+    FinishSketchResult(res, OneRequest(hr, args));
 }
 
 static void SketchImage(const json &args, ToolResult *res) {
@@ -452,7 +900,7 @@ static void SketchImage(const json &args, ToolResult *res) {
     SS.MarkGroupDirty(SS.GW.activeGroup);
     Regenerate();
     t.Commit();
-    FinishSketchResult(res, json::array({RequestJson(hr)}));
+    FinishSketchResult(res, OneRequest(hr, args));
 }
 
 //-----------------------------------------------------------------------------
@@ -483,7 +931,7 @@ static void SketchWorkplane(const json &args, ToolResult *res) {
     SK.GetEntity(hr.entity(32))->NormalForceTo(q);
     Regenerate();
     t.Commit();
-    FinishSketchResult(res, json::array({RequestJson(hr)}));
+    FinishSketchResult(res, OneRequest(hr, args));
 }
 
 //-----------------------------------------------------------------------------
@@ -601,20 +1049,37 @@ void AddSketchTools(std::vector<Tool> *tools) {
     json construction = BoolProp(false,
         "Construction geometry: used for constraints, but not part of the profile.");
     json point = PointSchema("[u, v] in the active workplane, or [x, y, z] in a 3D sketch (mm).");
+    json verbose = BoolProp(false, "Return every generated entity with [x,y,z] too.");
+    json constrain = BoolProp(false,
+        "Also add dimensions for the current size and position (lengths, width and "
+        "height, diameter; the distance from the workplane origin, or coincidence with "
+        "it), so the shape is fully constrained (0 DOF). The result's 'dimensions' gives "
+        "their handles for set_constraint_value.");
     tools->push_back({
         "create_workplane_sketch",
         "Create a new 'sketch in workplane' group and make it active; it is inserted "
-        "after the active group. Ways to place the workplane:\n"
+        "after the active group. Ways to place the workplane (prefer the first three):\n"
         "- plane only: on a reference plane through the origin. XY: u=X, v=Y; YZ: "
         "u=Y, v=Z; ZX: u=Z, v=X.\n"
-        "- point (+ plane): through an existing point, parallel to that reference "
-        "plane. Use this to sketch on a face of a solid: pick a vertex on the face "
-        "and the plane the face is parallel to.\n"
+        "- plane + offset and/or origin [x,y,z]: parallel to the reference plane, moved "
+        "along its normal by offset (XY: +Z, YZ: +X, ZX: +Y), through origin. E.g. "
+        "{plane:'XY', offset:420} sketches at z=420; [u, v] stay model coordinates. The "
+        "origin is a datum point in a hidden group, fixed by dimensions; "
+        "offset_constraint changes the height later.\n"
+        "- face: on a face of a solid (find_faces, or extrude's result), its normal "
+        "pointing out of the solid: positive extrude depth adds material outward, a "
+        "negative depth with combine='difference' cuts in. For faces parallel to a "
+        "reference plane, [u, v] are model coordinates (top face: u=X, v=Y; vertical "
+        "faces have v=Z) and the sketch follows the face if the solid changes.\n"
+        "- point (+ plane): through an existing point, parallel to that reference plane.\n"
         "- point + normal: through the point, perpendicular to a normal entity.\n"
         "- point + line_a + line_b: through the point, parallel to two lines.\n"
         "- workplane: a copy of an existing workplane entity.",
         {{"type", "object"}, {"properties", {
             {"plane", {{"type", "string"}, {"enum", {"XY", "YZ", "ZX"}}, {"default", "XY"}}},
+            {"offset", NumProp("Distance along the plane's normal, mm.")},
+            {"origin", Vec3Schema("The workplane origin [x, y, z] mm (with plane).")},
+            {"face", StrProp("Face entity handle to sketch on.")},
             {"point", StrProp("Point entity handle the workplane passes through.")},
             {"normal", StrProp("Normal entity handle (with point).")},
             {"line_a", StrProp("Line entity handle (with point and line_b).")},
@@ -635,7 +1100,7 @@ void AddSketchTools(std::vector<Tool> *tools) {
     tools->push_back({
         "sketch_point",
         "Draw a datum point in the active sketch.",
-        {{"type", "object"}, {"properties", {{"at", point}, {"construction", construction}}},
+        {{"type", "object"}, {"properties", {{"at", point}, {"construction", construction}, {"verbose", verbose}}},
          {"required", {"at"}}},
         SketchPointTool,
     });
@@ -644,38 +1109,54 @@ void AddSketchTools(std::vector<Tool> *tools) {
         "Draw a line segment, or a polyline through several points, in the active "
         "sketch. Consecutive segments are joined with coincident constraints; with "
         "closed=true the last point is joined back to the first, making a closed "
-        "profile that can be extruded.",
+        "profile that can be extruded. constrain=true adds horizontal/vertical "
+        "constraints for axis-aligned segments, an angle to the previous segment for "
+        "others, lengths, and anchors the first point.",
         {{"type", "object"}, {"properties", {
             {"points", {{"type", "array"}, {"items", point}, {"minItems", 2},
                         {"description", "The vertices, in order."}}},
             {"closed", BoolProp(false, "Join the last point back to the first.")},
             {"construction", construction},
+            {"constrain", constrain},
+            {"verbose", verbose},
         }}, {"required", {"points"}}},
         SketchLine,
     });
     tools->push_back({
         "sketch_rectangle",
         "Draw an axis-aligned rectangle in the active workplane, given two opposite "
-        "corners in workplane coordinates (mm). Like the GUI's rectangle tool, it "
-        "creates 4 line segments with coincident corners and horizontal/vertical "
-        "constraints, leaving 4 degrees of freedom (position and size).",
+        "corners, or a center with width and height, in workplane coordinates (mm). "
+        "Like the GUI's rectangle tool, it creates 4 line segments with coincident "
+        "corners and horizontal/vertical constraints, leaving 4 degrees of freedom; "
+        "constrain=true adds width, height and position dimensions (0 DOF; the "
+        "center form constrains the center). The result names the edges "
+        "(bottom/right/top/left) and corners.",
         {{"type", "object"}, {"properties", {
             {"corner1", Point2Schema("[u, v]")},
             {"corner2", Point2Schema("[u, v]")},
+            {"center", Point2Schema("[u, v] (with width and height)")},
+            {"width", NumProp("Size along u, mm (with center).")},
+            {"height", NumProp("Size along v, mm (with center).")},
             {"construction", construction},
-        }}, {"required", {"corner1", "corner2"}}},
+            {"constrain", constrain},
+            {"verbose", verbose},
+        }}},
         SketchRectangle,
     });
     tools->push_back({
         "sketch_circle",
-        "Draw a circle in the active sketch. In a 3D sketch, normal sets its plane "
-        "(default [0,0,1]).",
+        "Draw a circle in the active sketch, by radius or diameter. In a 3D sketch, "
+        "normal sets its plane (default [0,0,1]). constrain=true adds the diameter and "
+        "the center's position.",
         {{"type", "object"}, {"properties", {
             {"center", point},
             {"radius", NumProp("Radius in mm.")},
+            {"diameter", NumProp("Diameter in mm (instead of radius).")},
             {"normal", Vec3Schema("3D sketches only: the circle's axis.")},
             {"construction", construction},
-        }}, {"required", {"center", "radius"}}},
+            {"constrain", constrain},
+            {"verbose", verbose},
+        }}, {"required", {"center"}}},
         SketchCircle,
     });
     tools->push_back({
@@ -689,6 +1170,7 @@ void AddSketchTools(std::vector<Tool> *tools) {
             {"end", Point2Schema("[u, v]")},
             {"clockwise", BoolProp(false, "Go clockwise from start to end.")},
             {"construction", construction},
+            {"verbose", verbose},
         }}, {"required", {"center", "start", "end"}}},
         SketchArc,
     });
@@ -705,6 +1187,7 @@ void AddSketchTools(std::vector<Tool> *tools) {
             {"end_control", point},
             {"periodic", BoolProp(false, "Closed, periodic spline.")},
             {"construction", construction},
+            {"verbose", verbose},
         }}, {"required", {"points"}}},
         SketchCubic,
     });

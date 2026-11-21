@@ -33,10 +33,18 @@ static const char *SUPPORTED_VERSIONS[] = {
 //-----------------------------------------------------------------------------
 enum JobState { QUEUED, RUNNING, ABANDONED };
 
+// What a tool call produced on the GUI thread.
+struct CallOutcome {
+    ToolResult               result;
+    std::vector<std::string> errors;
+    std::vector<std::string> messages;
+    bool                     cancelledPending = false;
+};
+
 struct Job {
-    std::function<json()>   work;
-    std::promise<json>      result;
-    std::atomic<int>        state{QUEUED};
+    std::function<CallOutcome()> work;
+    std::promise<CallOutcome>    result;
+    std::atomic<int>             state{QUEUED};
 };
 
 static std::mutex                           queueMutex;
@@ -75,10 +83,10 @@ static void Pump() {
 }
 
 // Called on an HTTP thread; blocks until the GUI thread has run `work`.
-static json RunOnGuiThread(std::function<json()> work) {
+static CallOutcome RunOnGuiThread(std::function<CallOutcome()> work) {
     std::shared_ptr<Job> job = std::make_shared<Job>();
     job->work = work;
-    std::future<json> future = job->result.get_future();
+    std::future<CallOutcome> future = job->result.get_future();
     {
         std::lock_guard<std::mutex> lock(queueMutex);
         queue.push_back(job);
@@ -103,24 +111,24 @@ static json RunOnGuiThread(std::function<json()> work) {
 //-----------------------------------------------------------------------------
 // Tool execution, on the GUI thread.
 //-----------------------------------------------------------------------------
-static json CallToolOnGuiThread(const std::string &name, const json &args) {
-    const Tool *tool = NULL;
+static const Tool *FindTool(const std::string &name) {
     for(const Tool &t : GetTools()) {
-        if(t.name == name) tool = &t;
+        if(t.name == name) return &t;
     }
-    if(tool == NULL) {
-        throw std::invalid_argument("Unknown tool: " + name);
-    }
+    return NULL;
+}
 
+static CallOutcome CallToolOnGuiThread(const Tool *tool, const json &args) {
     MessageCapture capture;
     activeMessageCapture = &capture;
 
+    CallOutcome out;
     // If the user is half-way through drawing something, abandon it; the
     // pending operation would otherwise interfere with the tool.
     using Pending = GraphicsWindow::Pending;
     Pending op = SS.GW.pending.operation;
-    bool hadPending = op != Pending::NONE;
-    if(hadPending) {
+    if(op != Pending::NONE) {
+        out.cancelledPending = true;
         // As pressing Esc does: these operations have already added the
         // geometry being drawn, which an undo removes.
         SS.GW.ClearSuper();
@@ -132,10 +140,9 @@ static json CallToolOnGuiThread(const std::string &name, const json &args) {
         }
     }
 
-    ToolResult result;
     std::string failure;
     try {
-        tool->handler(args, &result);
+        tool->handler(args, &out.result);
     } catch(ToolError &e) {
         failure = e.what();
     } catch(json::exception &e) {
@@ -148,34 +155,50 @@ static json CallToolOnGuiThread(const std::string &name, const json &args) {
     SS.GW.Invalidate();
     SS.ScheduleShowTW();
 
-    std::vector<std::string> errors = capture.errors;
-    if(!failure.empty()) errors.insert(errors.begin(), failure);
+    out.errors = capture.errors;
+    if(!failure.empty()) out.errors.insert(out.errors.begin(), failure);
+    out.messages = capture.messages;
+    if(!out.errors.empty()) out.result.finishOffGuiThread = nullptr;
+    return out;
+}
 
-    json out;
+// Turns the outcome into a tools/call result; on the HTTP thread.
+static json CallResultJson(CallOutcome &out) {
+    if(out.errors.empty() && out.result.finishOffGuiThread) {
+        try {
+            out.result.finishOffGuiThread(&out.result);
+        } catch(ToolError &e) {
+            out.errors.push_back(e.what());
+        } catch(std::exception &e) {
+            out.errors.push_back(std::string("Internal error: ") + e.what());
+        }
+    }
+    json wire;
     json content = json::array();
-    if(!errors.empty()) {
+    if(!out.errors.empty()) {
         std::string text;
-        for(const std::string &e : errors) {
+        for(const std::string &e : out.errors) {
             if(!text.empty()) text += "\n";
             text += e;
         }
         content.push_back({{"type", "text"}, {"text", text}});
-        out["isError"] = true;
+        wire["isError"] = true;
     } else {
-        if(!capture.messages.empty()) {
-            result.structured["messages"] = capture.messages;
+        ToolResult &result = out.result;
+        if(!out.messages.empty()) {
+            result.structured["messages"] = out.messages;
         }
-        if(hadPending) {
+        if(out.cancelledPending) {
             result.structured["note"] =
                 "An in-progress drawing operation in the GUI was cancelled.";
         }
-        content.push_back({{"type", "text"}, {"text", result.structured.dump(2)}});
+        content.push_back({{"type", "text"}, {"text", result.structured.dump()}});
         for(const json &c : result.content) content.push_back(c);
-        out["structuredContent"] = result.structured;
-        out["isError"] = false;
+        wire["structuredContent"] = result.structured;
+        wire["isError"] = false;
     }
-    out["content"] = content;
-    return out;
+    wire["content"] = content;
+    return wire;
 }
 
 //-----------------------------------------------------------------------------
@@ -248,14 +271,14 @@ static json HandleMessage(const json &msg) {
             std::string name = params.value("name", "");
             json args = params.contains("arguments") && params["arguments"].is_object()
                 ? params["arguments"] : json::object();
+            const Tool *tool = FindTool(name);
+            if(tool == NULL) return RpcError(id, -32602, "Unknown tool: " + name);
             try {
-                json result = RunOnGuiThread([=] { return CallToolOnGuiThread(name, args); });
-                return RpcResult(id, result);
+                CallOutcome out = RunOnGuiThread([=] { return CallToolOnGuiThread(tool, args); });
+                return RpcResult(id, CallResultJson(out));
             } catch(ToolError &e) {
                 return RpcResult(id, {{"isError", true},
                     {"content", {{{"type", "text"}, {"text", e.what()}}}}});
-            } catch(std::invalid_argument &e) {
-                return RpcError(id, -32602, e.what());
             }
         } else {
             return RpcError(id, -32601, "Method not found: " + method);

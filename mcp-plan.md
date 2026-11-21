@@ -2,12 +2,24 @@
 
 Goal: the SolveSpace GUI runs an MCP server, so that Claude (Claude Code, Claude
 Desktop, or another MCP client on the same machine) can connect to it and build,
-inspect and view models. That covers workplane and 3D sketches, every entity
-type, constraints, extrude/lathe/revolve/helix/rotate/translate, reading the
-model back, screenshots, camera control, and group and display visibility.
+inspect and view models: workplane and 3D sketches, every entity type,
+constraints, extrude/lathe/revolve/helix/rotate/translate, reading the model
+back, screenshots, camera and display control.
 
-This file is the handoff document. §0 is the current state, and §5 is what to
-do next.
+## Start here (for a fresh session)
+
+1. Read §0 (state, how to run and test) and §3 (lessons; several were bugs).
+2. Check the working tree: milestones 5b and 6 may still be uncommitted
+   (`git status`; see "Commits so far" in §0).
+3. Build and run the tests (§0) to confirm the baseline: 24 MCP tests and
+   SolveSpace's 300 tests should pass.
+4. The next task is **Milestone 1, hardening and settings** (§5). §1 explains
+   the architecture you will be changing; §1.4 has the patterns for writing
+   tools.
+
+Remaining milestones, in order: **1** (settings UI, token, clean shutdown),
+**7** (selection, analysis, export), **8** (headless/CI, MCP resources). The
+optional 5b/6 follow-ups in §5 are small and can be done any time.
 
 ---
 
@@ -16,10 +28,10 @@ do next.
 | | |
 |---|---|
 | Branch | `mcp-server` (from `main`; the upstream main branch is `master`) |
-| Done | Milestone 0 (vertical slice) and milestones 2–5 (documents/groups, sketching, constraints, 3D operations). 45 tools. |
-| Not done | Milestone 1 (settings UI, token), **5b (modelling ergonomics; next, see §5)**, 6 (camera/display), 7 (selection/analysis/export), 8 (headless/CI) |
-| Tests | `test/mcp/mcp_tests.py`: 13 end-to-end tests against a live GUI, all passing. SolveSpace's own suite (`cmake --build build --target test_solvespace`): 300 cases passing. |
-| Field test | Claude modelled a kitchen chair over MCP: legs, seat, back posts, backrest; 9 groups, all fully constrained. The lessons from that session are in §5. |
+| Done | Milestone 0 (vertical slice), milestones 2–5 (documents/groups, sketching, constraints, 3D operations), **5b (modelling ergonomics)** and **6 (view, navigation, display, styles)**. 63 tools. |
+| Not done | Milestone 1 (settings UI, token; **next**, see §5), 7 (selection/analysis/export), 8 (headless/CI) |
+| Tests | `test/mcp/mcp_tests.py`: 24 end-to-end tests against a live GUI, all passing, including the chair as an acceptance test. SolveSpace's own suite (`cmake --build build --target test_solvespace`): 300 cases passing. |
+| Field test | Claude modelled a kitchen chair over MCP: 16 calls and three ~70-point listings. With 5b, the same chair (`test_chair_acceptance`) takes 3 calls (one `batch`, a summary, a 3-view screenshot) and ~11 KB of text results, every group at 0 DOF. |
 | Platforms | Only the macOS build has been compiled and run. The GTK, Windows and Qt changes are small and mechanical but have not been compiled. |
 
 ### How to run it
@@ -65,8 +77,14 @@ python3 test/mcp/mcp_smoke.py --url ...              # milestone 0 smoke test
 ```
 
 `--out` collects saved `.slvs` files and screenshots (`extrude_cut.png`,
-`revolve.png`, `helix.png`, `translate.png`). Look at them: a test that passes
-can still render wrongly.
+`revolve.png`, `helix.png`, `translate.png`, `view_*.png`, `chair_*.png`,
+`window.png`, ...). Look at them: a test that passes can still render wrongly.
+
+**Settings warning.** The test instance shares SolveSpace's saved settings
+with the user's own copy, and some tools change settings that SolveSpace
+writes back at exit (`set_units` → `ViewUnits`, `set_perspective` →
+`CameraTangent`). `test_display_and_units` restores them; if you try these
+tools by hand on a test instance, put them back before quitting it.
 
 `test/mcp/mcp_client.py` is a small client that uses only the standard
 library. Its methods are:
@@ -81,7 +99,12 @@ The tool name is the positional parameter `_tool`, so that tools taking a
 
 1. `4dc31fed` Milestone 0: HTTP server, job pump, message capture, 5 tools.
 2. `96cfa87f` Milestones 2–5, plus fixes from an independent code review.
-3. This handoff update.
+3. `1bd9040a` Handoff update.
+4. Milestones 5b and 6: compact results, offset/face sketches, `find_faces`,
+   `constrain`, `batch`, screenshot views; view, display and style tools.
+   Uncommitted when this was written; if `git status` shows the files in §1.6
+   as modified, commit them first (one commit, "MCP: modelling ergonomics and
+   view/display tools (milestones 5b and 6)").
 
 ---
 
@@ -143,8 +166,16 @@ The tool name is the positional parameter `_tool`, so that tools taking a
    becomes "Invalid arguments: ...".
 4. **The UI is refreshed.** The call ends with `SS.GW.Invalidate()` and
    `SS.ScheduleShowTW()`.
-5. **Result.** `structuredContent` plus the same JSON as `text` content, and any
-   `image` content. Errors are a single text item.
+5. **Result.** `structuredContent` plus the same JSON (compact, not
+   pretty-printed) as `text` content, and any `image` content. Errors are a
+   single text item.
+6. **Finishing off the GUI thread.** A tool can set
+   `ToolResult::finishOffGuiThread`; the HTTP thread calls it after the GUI
+   part returns, and it may block. `screenshot {source:"window"}` uses this:
+   the GUI part sets `GraphicsWindow::onFrameCaptured` (a one-shot hook in
+   `Paint`, `draw.cpp`) and invalidates the window; the HTTP thread waits up
+   to 10 s for the PNG. The GUI part of a call is in `CallToolOnGuiThread`, the
+   wire result is built by `CallResultJson` on the HTTP thread.
 
 ### 1.4 Writing a tool (patterns in `mcptools.h` / `tools_common.cpp`)
 
@@ -169,6 +200,27 @@ The tool name is the positional parameter `_tool`, so that tools taking a
   `SS.viewUnits` temporarily set to mm. Expressions and new named parameters
   therefore behave exactly as typed in the GUI. Numbers are formatted without
   exponents, because the expression lexer rejects `5e-05`.
+* **Results are compact by default** (`verbose: true` for the full form):
+  `EntityJson(e, verbose)` gives points in a workplane as `uv` only, drops
+  `construction: false`; `RequestJson(hr, verbose)` gives the main entity with
+  its points; numbers go through `Round()` (1e-6) and colours are `#rrggbb`.
+* **`constrain: true`** helpers are in `tools_sketch.cpp`: `AddDimension`
+  (adds a dimension at its current value via `ModifyToSatisfy`),
+  `AnchorPoint` (coincident with the workplane origin, else two
+  `PROJ_PT_DISTANCE`s along vector entities: the shape's own horizontal and
+  vertical lines, or the reference planes' normals when the workplane is
+  axis-aligned), `CheckConstrained`.
+* **Datum groups.** `create_workplane_sketch {offset|origin|face}` inserts a
+  hidden 3D sketch holding one datum point, fixed by `PT_PLANE_DISTANCE`s to
+  the reference planes (`PT_IN_PLANE` where 0) and, for faces, `PT_ON_FACE`;
+  then a `WORKPLANE_BY_POINT_ORTHO` group through that point with
+  `predef.q` set explicitly (`MakeDatumPoint`, `MakeWorkplaneGroup`).
+* **Faces.** `GetFaceInfos` finds each face's triangles in the active group's
+  `displayMesh` (`STriangle::meta.face`) for its centre, bounds, area and
+  **outward** normal. Face entities don't know which way is out: an
+  extrusion's top and bottom faces carry the same normal.
+* **Initialise handles.** `hEntity x;` is uninitialised (a POD). Write
+  `hEntity x = Entity::NO_ENTITY;`. This caused a crash (§3).
 * **`ParseEntity`** rejects entities in groups *after* the active group. Those
   are hidden, and a constraint or group that refers to them gets pruned on
   regeneration, which used to crash on stale pointers.
@@ -184,7 +236,8 @@ The tool name is the positional parameter `_tool`, so that tools taking a
   a group look like `e:8005002a`.
 * **Units:** lengths in **mm** and angles in **degrees**, always.
 * **Coordinates:** `[u, v]` in the active workplane, or `[x, y, z]` in 3D
-  sketches. Results give `xyz`, plus `uv` for workplane entities.
+  sketches. Compact results give `uv` for points in a workplane and `xyz`
+  otherwise; `verbose: true` gives both.
 
 ### 1.6 Code layout
 
@@ -196,14 +249,18 @@ src/mcp/mcptools.h              shared helper declarations, Transaction
 src/mcp/tools_common.cpp        handles, args, JSON for groups/entities/constraints,
                                 Transaction, tool registry (GetTools)
 src/mcp/tools_model.cpp         get_model_summary, get_group, list_entities,
-                                screenshot, ServerInstructions
-src/mcp/tools_document.cpp      new/open/save, undo/redo, group management, delete
+                                find_faces, screenshot, ServerInstructions
+src/mcp/tools_document.cpp      new/open/save, undo/redo, group management, delete,
+                                batch
 src/mcp/tools_sketch.cpp        sketch groups and all entity types, fillet, split,
                                 construction, move_point
 src/mcp/tools_constraint.cpp    constraints, solve status, parameters, relations
-src/mcp/tools_ops.cpp           extrude, lathe, revolve, helix, rotate/translate
-                                copies, link_file
+src/mcp/tools_ops.cpp           extrude (with end faces), lathe, revolve, helix,
+                                rotate/translate copies, link_file
+src/mcp/tools_view.cpp          view/camera, display options, units, perspective,
+                                exploded sketch, styles (milestone 6)
 src/util.{h,cpp}                MessageCapture hook in MessageBox()
+src/ui.h, src/draw.cpp          GraphicsWindow::onFrameCaptured (window screenshots)
 src/file.cpp                    LocateImportedFile: no prompt while capturing
 src/platform/gui.{h,cpp}        Platform::modalDepth / ModalScope
 src/platform/gui*.{cpp,mm}      ModalScope in each RunModal/ShowModal
@@ -216,17 +273,19 @@ test/mcp/                       mcp_client.py, mcp_smoke.py, mcp_tests.py
 
 ---
 
-## 2. Tool reference (45 tools)
+## 2. Tool reference (63 tools)
 
 | Area | Tools |
 |---|---|
-| Read | `get_model_summary`, `get_group`, `list_entities {group?, kind: all/curves/points/faces/workplanes}`, `list_constraints`, `get_solve_status` (with free points), `list_parameters`, `screenshot {width, height, zoom_to_fit}` |
-| Document | `new_document {discard_unsaved}`, `open_file {path}`, `save_file {path?}`, `undo {steps}`, `redo {steps}` |
+| Read | `get_model_summary` (with `solid_bounds`), `get_group`, `list_entities {group?, kind: all/curves/points/faces/workplanes, unique_points, verbose}`, `find_faces {group?, normal?, near?, limit, include_hidden}`, `list_constraints`, `get_solve_status` (with free points), `list_parameters`, `screenshot {view \| views, width, height, zoom_to_fit, units, highlight, shaded, hidden_lines, source: render/window}` |
+| Document | `new_document {discard_unsaved}`, `open_file {path}`, `save_file {path?}`, `undo {steps}`, `redo {steps}`, `batch {calls: [{tool, args}]}` |
 | Groups | `activate_group`, `set_group_visibility {group \| groups, visible}`, `set_group_properties {name, color, opacity, combine, sides, skewed, suppress, relax_constraints, allow_redundant, count, skip_first}`, `delete_group` |
-| Sketch groups | `create_workplane_sketch {plane \| point+plane \| point+normal \| point+line_a+line_b \| workplane}`, `create_3d_sketch` |
-| Entities | `sketch_point`, `sketch_line {points, closed}`, `sketch_rectangle`, `sketch_circle {normal in 3D}`, `sketch_arc {clockwise}`, `sketch_cubic {points, start/end_control, periodic}`, `sketch_text`, `sketch_image` (PNG only), `sketch_workplane` (3D only), `fillet {point, radius}`, `split_curves`, `set_construction`, `move_point`, `delete {handles}` |
+| Sketch groups | `create_workplane_sketch {plane \| plane+offset/origin \| face \| point+plane \| point+normal \| point+line_a+line_b \| workplane}`, `create_3d_sketch` |
+| Entities | `sketch_point`, `sketch_line {points, closed, constrain}`, `sketch_rectangle {corner1+corner2 \| center+width+height, constrain}`, `sketch_circle {radius \| diameter, normal in 3D, constrain}`, `sketch_arc {clockwise}`, `sketch_cubic {points, start/end_control, periodic}`, `sketch_text`, `sketch_image` (PNG only), `sketch_workplane` (3D only), `fillet {point, radius}`, `split_curves`, `set_construction`, `move_point`, `delete {handles}`. All take `verbose`. |
 | Constraints | `add_constraint {type, points, entities, value, reference, supplementary}` (types: distance, diameter, angle, coincident, on_entity, equal, ratio, difference, horizontal, vertical, parallel, tangent, perpendicular, symmetric, midpoint, same_orientation, lock), `set_constraint_value`, `set_constraint_reference`, `add_comment`, `set_parameter`, `add_relation` |
-| 3D ops | `extrude {depth, sides, combine, constrain_depth}`, `lathe {axis, axis_point}`, `revolve {angle_deg}`, `helix {angle_deg, pitch \| axial_travel}`, `rotate_copy {center, axis, count, angle_deg}`, `translate_copy {step, count}`, `link_file {path}` |
+| 3D ops | `extrude {depth, sides, combine, constrain_depth}` (returns `depth_constraint` and `faces.top/bottom`), `lathe {axis, axis_point}`, `revolve {angle_deg}`, `helix {angle_deg, pitch \| axial_travel}`, `rotate_copy {center, axis, count, angle_deg}`, `translate_copy {step, count}`, `link_file {path}` |
+| View (M6) | `get_view`, `set_view {center \| offset, proj_right, proj_up, scale}`, `orient_view {preset: iso/front/back/left/right/top/bottom/workplane/nearest_ortho/nearest_iso, zoom_to_fit}`, `zoom {factor}`, `zoom_to_fit {handles?}`, `pan {dx, dy \| by}`, `rotate_view {axis, angle_deg}`, `center_on {point}`, `set_perspective {enabled, factor}`, `set_explode_sketch {enabled, distance}`, `set_units {mm/m/in/ft_in}` |
+| Display, styles (M6) | `set_display_options {workplanes, normals, points, construction, constraints: none/all/dimensions, shaded, faces, edges, outlines, mesh, snap_grid, dim_solid, hidden_lines}` (no arguments: read them), `list_styles`, `create_style {name, color, width, width_units, visible, stipple}`, `set_style_properties {style, ...}`, `set_style {handles, style}` |
 
 Behaviour worth knowing:
 * A change that makes a previously solving sketch fail is rolled back. The
@@ -243,6 +302,39 @@ Behaviour worth knowing:
   * translate step = 2·params
   * rotate and revolve angle = 4·param3
   * helix travel = 2·param7
+* **Sketch placement (5b).** `{plane:"XY", offset:420}` and
+  `{plane, origin:[x,y,z]}` keep the reference plane's orientation, so `[u, v]`
+  stay model coordinates; `offset_constraint` edits the height later.
+  `{face}` orients the workplane with the face's **outward** normal (positive
+  extrude depth builds outward; negative with `difference` cuts in), Z up on
+  vertical faces (front face: u=X, v=Z), and for axis-aligned faces puts the
+  origin where the face plane meets the axis through the model origin, so
+  `[u, v]` are model coordinates and the sketch follows the face. Other faces
+  use a vertex of the face as origin (noted in the result).
+* **`constrain: true` (5b)** adds dimensions at the drawn values:
+  rectangles get width, height and a corner (or, in the centre form, the
+  centre of a construction diagonal) anchored; circles a diameter and centre
+  position; polylines H/V or an angle to the previous segment (parallel if in
+  line), a length per segment (not the closing one), and the first point. In
+  a workplane not aligned with the reference axes, a circle's or polyline's
+  position can't be measured and is left free (with a `note`).
+* **`batch` (5b)** runs up to 50 calls in one Transaction: one undo step, and
+  any failure (including an `Error()` the tool didn't turn into an exception)
+  undoes them all. Strings like `"$2.faces.top.handle"` are replaced by values
+  from earlier results. `batch`, `new_document`, `open_file`, `save_file`,
+  `undo`, `redo` and window screenshots aren't allowed inside.
+* **Screenshot presets** use a Z-up convention: front looks from -Y, right from
+  +X, top from +Z, iso from (+1, -1, +1). Presets are fitted to the model by
+  default, and render without touching the GUI's camera, selection, units or
+  display settings. Labels are in mm unless `units: "display"`.
+* **View tools change the user's view** directly (no animation) and stop an
+  animation in progress, except `orient_view nearest_ortho/nearest_iso`,
+  which use the View menu and animate. `rotate_view`: positive angles turn the
+  model counter-clockwise seen from the axis's positive end. `pan {dx, dy}`
+  moves the model on screen by pixels; `pan {by}` moves the view centre.
+* **Saved settings:** `set_units` and `set_perspective` change values
+  SolveSpace saves at exit. The perspective factor is the configuration
+  screen's (0.3 typical; stored as `cameraTangent = factor/1000`).
 
 ---
 
@@ -261,10 +353,17 @@ Behaviour worth knowing:
   group or an earlier one. `UseSourceSketch` (ops) activates the source sketch
   *before* parsing the axis handles.
 * **The camera follows the user, not the tools.** `MenuGroup` animates the view
-  onto each new workplane (asynchronously, through a timer). The `screenshot`
-  tool uses the current GUI camera, so after sketching on XY planes every
-  screenshot is a top-down view. Milestone 6 fixes this. In the chair session
-  the workaround was to create a YZ sketch to turn the view, then `undo`.
+  onto each new workplane (asynchronously, through a timer). Use
+  `screenshot {view|views}` (offscreen presets) to check the model; the view
+  tools move the user's camera and should be used when the user asks.
+* **Uninitialised handles.** `hEntity uVec, vVec;` holds garbage; using it
+  as a constraint entity hit `ssassert` in `GetEntity` and aborted SolveSpace
+  (crash reports are in `~/Library/Logs/DiagnosticReports/SolveSpace-*.ips`;
+  lldb didn't get the app's server up, the `.ips` backtrace was enough).
+* **Signed distances keep their sign.** `PT_PLANE_DISTANCE` and
+  `PROJ_PT_DISTANCE` values are signed; `set_constraint_value` keeps the sign
+  like the GUI does (typing 30 into a -50 dimension gives -30; give a negative
+  value to flip).
 * **The client caches tool schemas.** See the reconnect note in §0.
 
 ---
@@ -283,117 +382,75 @@ Behaviour worth knowing:
   deleted with `delete`.
 * **M5, 3D operations.** Faces are listed with `list_entities kind=faces`.
   Skewed extrusions are switched on with `set_group_properties`.
-
----
+* **M5b, modelling ergonomics.** All eight items, as planned, plus:
+  * Offset/origin/face sketches use a hidden datum group (parametric: the
+    offset is a dimension; face sketches follow the face).
+  * `constrain` anchors off-origin shapes with projected distances from the
+    workplane origin, not only at the origin. Rectangles have a centre form,
+    circles take `diameter`.
+  * `batch` was chosen over `shapes: [...]`, with `$N.path` references.
+  * Compact results everywhere, rounding, hex colours, and the text content
+    is no longer pretty-printed. `extrude` returns `depth_constraint` and its
+    end faces.
+  * Screenshot `views` (up to 6), `units`, and (from M6) `highlight`, `shaded`,
+    `hidden_lines`, `source: "window"`.
+* **M6, view and display.** As planned, except:
+  * `set_style_visibility` became `set_style_properties` (visibility,
+    colour, width, stipple, name), and `create_style` was added, since custom
+    styles otherwise can't be made.
+  * `zoom_to_fit {selection_only}` became `zoom_to_fit {handles}`.
+  * `source: "window"` needs SolveSpace changes (`onFrameCaptured` in
+    `ui.h`/`draw.cpp`) and the deferred-result path in `mcpserver.cpp`.
 
 ## 5. Next steps (in priority order)
 
-### Milestone 5b — Modelling ergonomics (do this first)
+### Milestone 1 — Hardening and settings (do this next)
 
-These come from Claude actually modelling a chair through the tools. Each one
-removed friction or wasted context in that session. All of them are additions
-inside `src/mcp/` and need no changes to SolveSpace itself.
+Goal: a user who never touches a terminal can turn MCP on, and it is safe to
+leave on.
 
-1. **Sketch at a height or offset, without hunting for a vertex.** For the
-   seat and the backrest, Claude had to list about 70 points (`list_entities
-   kind=points`) to find one at z=420 or z=900, just to anchor a workplane.
-   * Add `create_workplane_sketch {plane: "XY", offset: 420}` (the reference
-     plane moved along its normal) and `{origin: [x,y,z], plane}`.
-   * Implementation: a `WORKPLANE_BY_POINT_ORTHO` group needs an origin
-     *point entity* (`predef.origin`). Either build the group directly (the
-     `predef.q` from the reference plane, plus an origin point), or first
-     create a small hidden "datums" 3D sketch group holding a datum point, then
-     select that point plus the plane orientation, as is done today.
-   * Choose the option that keeps the result parametric (the offset as a
-     dimension that can be edited later).
-2. **Sketch on a face, by face.**
-   * Add `create_workplane_sketch {face: "e:..."}`. Compute the frame from the
-     face normal and point; for the origin, use a vertex on the face or the
-     point the face entity carries (`FaceGetPointNum`).
-   * Add `find_faces {group?, normal?: "+z"|[x,y,z], near?: [x,y,z]}`. It
-     returns a few faces (handle, normal, point, rough bounds), not every
-     entity.
-   * The common request "sketch on the top of the seat" should take one call.
-3. **Compact results by default.**
-   * A `sketch_rectangle` result was about 2 KB, mostly repeated point JSON.
-     Return request handles, key point handles with their `uv`, and the solve
-     status. Keep the full form behind `verbose: true`.
-   * Do the same for `list_entities`. Extruded groups list each vertex
-     several times (once per edge copy), so deduplicate by position, or add
-     `unique_points: true`.
-   * Add an `extrude` result section with the useful generated handles: the
-     top and bottom face handles, and a top-face vertex. That lets the next
-     sketch chain on without a lookup.
-4. **Fully constrained primitives in one call.** Add `constrain: true` to
-   `sketch_rectangle`, `sketch_circle` and `sketch_line`. It adds the
-   width/height, diameter or length dimensions, and anchors the shape to the
-   workplane origin when a corner or centre is on it. The result is 0 DOF
-   without a series of `add_constraint` calls. Also add a `center` +
-   `width`/`height` form for `sketch_rectangle`.
-5. **Several shapes per call.** Four legs took four `sketch_rectangle` calls.
-   Choose between:
-   * a `shapes: [...]` array on the sketch tools, or
-   * a general `batch {calls: [{tool, args}, ...]}` tool that runs all the
-     calls in **one Transaction** (all or nothing, one undo step).
+1. **Persistent settings.** Add `mcpEnabled`, `mcpPort` and `mcpToken` to
+   `SolveSpaceUI` (`solvespace.h`), thawed and frozen next to the other
+   settings in `solvespace.cpp` (e.g. `CameraTangent` is thawed at line ~69 and
+   frozen at ~271). This matters on macOS, where an app launched from Finder
+   gets no arguments or environment.
+   * Precedence: `--mcp[=PORT]` / `SOLVESPACE_MCP_PORT` (`Mcp::PortFromArgs`,
+     called in `src/platform/entrygui.cpp`) override the saved settings for
+     that run; otherwise start the server if `mcpEnabled`.
+2. **Configuration screen.** Add an "MCP server" section to
+   `TextWindow::ShowConfiguration` (`src/confscreen.cpp`): enable/disable, the
+   port, the token (show it masked; offer "generate"), and the status line.
+   Edits go through the `Edit::...` enum and `EditControlDone` cases in the
+   same file (see `Edit::CAMERA_TANGENT` for the pattern). Toggling must start
+   or stop the server at once (`Mcp::StartServer` / `StopServer`); a port that
+   can't be bound must show an error in the screen, not just on stderr.
+3. **"Copy connect command"** in that section: puts
+   `claude mcp add --transport http solvespace http://127.0.0.1:PORT/mcp` on the
+   clipboard, with `--header "Authorization: Bearer TOKEN"` when a token is set.
+   Check what clipboard API `Platform` offers (the GUI copies text elsewhere,
+   e.g. for the property browser).
+4. **Bearer token.** In `HandleHttp` (`mcpserver.cpp`), next to the Origin
+   check, reject requests without `Authorization: Bearer <token>` with 401 when
+   a token is configured. Compare in constant time. `HttpRequest::Header()` is
+   case-insensitive already (`httpserver.h`). Add a test: the client in
+   `test/mcp/mcp_client.py` needs an optional header.
+5. **Status indicator.** `HandleInitialize` already logs `clientInfo.name`;
+   keep the last client's name and time (atomically, it runs on an HTTP
+   thread) and show "MCP: listening on 47474" / "connected: claude-code" in the
+   configuration screen, and optionally the window title.
+6. **Clean shutdown.** Connection threads are detached
+   (`httpserver.cpp`, `std::thread(ServeConnection...).detach()` at ~176) and
+   can touch the static `queue`/`queueMutex` (`mcpserver.cpp`) during static
+   destruction at exit. Track them (a counter plus condition variable, or a
+   list of sockets to shut down), close their sockets in `HttpServer::Stop`,
+   and wait for them; fail queued jobs on stop.
+7. Update `run-mcp.sh` only if useful (it's local, not committed), the
+   `ServerInstructions` if behaviour changes, and this file.
 
-   `batch` is more general, and also covers "sketch + extrude" in one round
-   trip.
-6. **Views for screenshots without moving the user's camera** (the most urgent
-   part of Milestone 6). Add a `view` argument to `screenshot`, one of
-   `"iso"|"front"|"back"|"left"|"right"|"top"|"bottom"|"current"`.
-   * Build a `Camera` from the preset, call `ZoomToFit(camera)`, and render
-     offscreen.
-   * Save and restore `SS.GW.offset`/`scale`/`projRight`/`projUp`, as
-     `zoom_to_fit` already does.
-   * Add `views: [...]` to return several images in one call (for example iso,
-     front and side), so one check covers the whole model.
-7. **Units in screenshots.** Dimension labels show the user's display units:
-   the chair's 160 mm label read "6.299", in inches. Add a
-   `units: "mm"|"display"` option to `screenshot`, which forces mm while
-   rendering.
-8. **Small things noticed:**
-   * `get_model_summary` could include the overall bounding box of the solid.
-     That gives a cheap sanity check ("is it 900 mm tall?").
-   * Group JSON shows the colour as 0.392… floats. Round them, or show hex.
-   * Tool descriptions should mention the `offset` and `face` options once they
-     exist, so the model reaches for them first.
-
-Add tests to `mcp_tests.py` for each item, and rerun the chair as an
-acceptance test: it should take about a third of the calls and much less
-context than before. In that session, 16 calls modelled the chair, with three
-long point listings.
-
-### Milestone 6 — View, navigation and display (the rest of it)
-
-* `get_view` / `set_view {offset, proj_right, proj_up, scale}`
-* `orient_view {preset}`, `zoom`, `zoom_to_fit {selection_only}`, `pan`,
-  `rotate_view {axis, angle_deg}`, `center_on {point}`
-* `set_perspective`, `set_explode_sketch`, `set_units {mm|in|ft_in|m}`
-* `screenshot` options:
-  * `source: "window"`, which reads the real GL frame on the next redraw, with
-    overlays;
-  * `highlight: [handles]`;
-  * `shaded`/`hidden_lines`.
-* `set_display_options {workplanes, normals, points, construction,
-  constraints: none|all|dimensions, faces, edges, outlines, mesh, shaded,
-  snap_grid}`. These are the `show*` fields in `ui.h` (~line 860).
-* Styles: `list_styles`, `set_style {entities, style}`,
-  `set_style_visibility`. These are the closest thing to per-layer visibility,
-  together with group visibility, which is already done.
-
-### Milestone 1 — Hardening and settings
-
-* A Configuration screen section:
-  * enable MCP, choose the port, set an optional token;
-  * a "copy `claude mcp add` command" button;
-  * the settings persist (needed on macOS, where Finder launches get no
-    arguments).
-* Bearer-token check.
-* A status indicator, such as "MCP: connected (Claude Code)", from
-  `clientInfo`.
-* Shutdown at exit: connection threads are detached and can still touch the
-  static `queue`/`queueMutex` during static destruction. Join them, or give
-  them a shared lifetime.
+Done when: MCP can be enabled from the configuration screen and survives a
+restart; a token, when set, is required; quitting SolveSpace with a client
+connected doesn't crash; tests cover the token; the other platforms' code at
+least looks right (only macOS can be built here).
 
 ### Milestone 7 — Selection, picking, analysis and export
 
@@ -401,7 +458,7 @@ long point listings.
   "constrain what I've selected").
 * `pick_at {x, y}` on the last screenshot.
 * `measure {volume|area|perimeter|center_of_mass}`, `check_interference`,
-  `check_naked_edges`, `get_bounding_box`.
+  `check_naked_edges`. (A bounding box is now in `get_model_summary`.)
 * `export {step|stl|obj|dxf|svg|pdf|png, path}`, using the `Export*` functions
   with explicit paths, so no file dialogs open.
 * `run_command {name}`: an escape hatch, with a blocklist for commands that
@@ -414,6 +471,17 @@ long point listings.
   `mcp_tests.py` scenarios in CI.
 * Resources: `solvespace://model` (JSON summary) and `solvespace://file`
   (`.slvs` text). A `model-a-part` prompt.
+
+### Small follow-ups from 5b/6 (optional)
+
+* `delete_group` on an offset/face sketch leaves its hidden datum group
+  behind. Delete the datum group with it, or reuse one datum group per model.
+* `batch` returns every call's full result (7 KB of the chair's 11 KB). An
+  option to return only some results would trim it further.
+* Polylines with an angled first segment in a non-aligned workplane, and
+  circles there, are left with free position (noted in the result).
+* `find_faces` and `solid_bounds` look at the solid **as of the active
+  group**; activate the last group to search the whole model.
 
 ---
 
@@ -432,4 +500,9 @@ long point listings.
 * **Error capture coverage:** new tools must not call code that opens file
   dialogs or save prompts. See §3.
 * **Screenshot fidelity:** the Cairo render differs slightly from the GL
-  window, and has no toolbar.
+  window, and has no toolbar. `source: "window"` is exact but is at the
+  screen's pixel density (about 1440×2000 on a Retina display) and fails if
+  the window isn't redrawn within 10 s (minimised or hidden).
+* **Breaking change for existing clients:** results are compact now. Clients
+  that read `requests[i].entities` or `sketch_rectangle`'s `lines` need
+  `verbose: true`, or the new fields (`entity`, `points`, `edges`).

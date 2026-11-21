@@ -32,6 +32,11 @@ struct ToolResult {
     json                structured = json::object();
     // Extra content items, e.g. {"type":"image", ...}.
     std::vector<json>   content;
+    // If set, called on the HTTP thread after the handler has returned on
+    // the GUI thread, to finish the result; it may block (e.g. waiting for
+    // the window to be redrawn) and throw ToolError. It must not touch the
+    // sketch or UI state.
+    std::function<void(ToolResult *)> finishOffGuiThread;
 };
 
 struct Tool {

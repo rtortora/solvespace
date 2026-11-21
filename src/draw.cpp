@@ -944,6 +944,11 @@ void GraphicsWindow::Paint() {
         if(f) fclose(f);
         SS.screenshotFile.Clear();
     }
+    if(onFrameCaptured) {
+        std::function<void(std::shared_ptr<Pixmap>)> captured = onFrameCaptured;
+        onFrameCaptured = nullptr;
+        captured(canvas->ReadFrame());
+    }
 
     // And finally the toolbar.
     if(SS.showToolbar) {

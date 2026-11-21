@@ -320,7 +320,123 @@ static void Delete(const json &args, ToolResult *res) {
     res->structured = {{"deleted", deleted}, {"solve", SolveStatus(SS.GW.activeGroup)}};
 }
 
+//-----------------------------------------------------------------------------
+// batch
+//-----------------------------------------------------------------------------
+static const int MAX_BATCH = 50;
+
+// Replaces strings like "$0.faces.top.handle" (a path into the result of an
+// earlier call in the batch) with the value found there.
+static json ResolveRefs(const json &j, const std::vector<json> &results) {
+    if(j.is_string()) {
+        const std::string &s = j.get_ref<const std::string &>();
+        if(s.size() < 2 || s[0] != '$' || !isdigit((unsigned char)s[1])) return j;
+        size_t i = 1;
+        while(i < s.size() && isdigit((unsigned char)s[i])) i++;
+        size_t n = (size_t)atoi(s.substr(1, i - 1).c_str());
+        if(n >= results.size()) {
+            throw ToolError("'" + s + "' refers to call " + std::to_string(n) +
+                            ", which hasn't run yet (calls are numbered from 0)");
+        }
+        const json *cur = &results[n];
+        while(i < s.size()) {
+            if(s[i] != '.') throw ToolError("Malformed reference '" + s + "'");
+            size_t next = s.find('.', i + 1);
+            std::string key = s.substr(i + 1, next == std::string::npos ? std::string::npos
+                                                                          : next - i - 1);
+            i = (next == std::string::npos) ? s.size() : next;
+            if(cur->is_array() && !key.empty() &&
+               key.find_first_not_of("0123456789") == std::string::npos) {
+                size_t k = (size_t)atoi(key.c_str());
+                if(k >= cur->size()) throw ToolError("No element " + key + " in '" + s + "'");
+                cur = &(*cur)[k];
+            } else if(cur->is_object() && cur->contains(key)) {
+                cur = &(*cur)[key];
+            } else {
+                throw ToolError("Can't resolve '" + s + "': no '" + key + "' in the result");
+            }
+        }
+        return *cur;
+    }
+    if(j.is_array()) {
+        json out = json::array();
+        for(const json &item : j) out.push_back(ResolveRefs(item, results));
+        return out;
+    }
+    if(j.is_object()) {
+        json out = json::object();
+        for(auto &it : j.items()) out[it.key()] = ResolveRefs(it.value(), results);
+        return out;
+    }
+    return j;
+}
+
+static void Batch(const json &args, ToolResult *res) {
+    const json &calls = args.value("calls", json());
+    if(!calls.is_array() || calls.empty()) throw ToolError("calls must be a non-empty array");
+    if((int)calls.size() > MAX_BATCH) {
+        throw ToolError("At most " + std::to_string(MAX_BATCH) + " calls per batch");
+    }
+    static const std::set<std::string> notInBatch = {
+        "batch", "new_document", "open_file", "save_file", "undo", "redo",
+    };
+    std::vector<json> results;
+    std::vector<json> content;
+    Transaction t;
+    for(size_t i = 0; i < calls.size(); i++) {
+        const json &call = calls[i];
+        std::string name = call.is_object() ? call.value("tool", "") : "";
+        std::string where = "calls[" + std::to_string(i) + "] (" + name + ")";
+        try {
+            if(name.empty()) throw ToolError("each call needs a 'tool'");
+            if(notInBatch.count(name)) throw ToolError("this tool can't be used in a batch");
+            const Tool *tool = NULL;
+            for(const Tool &tt : GetTools()) {
+                if(tt.name == name) tool = &tt;
+            }
+            if(tool == NULL) throw ToolError("unknown tool");
+            json callArgs = ResolveRefs(call.value("args", json::object()), results);
+            ToolResult r;
+            tool->handler(callArgs, &r);
+            // Errors reported through Error() also fail the batch.
+            ThrowIfErrors();
+            if(r.finishOffGuiThread) {
+                throw ToolError("screenshot with source='window' can't be used in a batch");
+            }
+            results.push_back(r.structured);
+            for(json &c : r.content) content.push_back(c);
+        } catch(ToolError &e) {
+            throw ToolError(where + " failed: " + e.what() +
+                            "\nNothing was changed: the whole batch was undone.");
+        } catch(json::exception &e) {
+            throw ToolError(where + " failed: invalid arguments: " + e.what() +
+                            "\nNothing was changed: the whole batch was undone.");
+        }
+    }
+    t.Commit();
+    res->structured = {{"results", results}, {"solve", SolveStatus(SS.GW.activeGroup)},
+                       {"active_group", H(SS.GW.activeGroup)}};
+    res->content = content;
+}
+
 void AddDocumentTools(std::vector<Tool> *tools) {
+    tools->push_back({
+        "batch",
+        "Run several tool calls in order as one step: all or nothing (if one fails, "
+        "the model is left as it was) and a single undo. Each call is {tool, args}. "
+        "An argument string like \"$0.faces.top.handle\" is replaced by that value "
+        "from call 0's result (dot-separated keys and array indices). E.g. sketch, "
+        "draw and extrude in one round trip. Not allowed inside: batch, "
+        "new_document, open_file, save_file, undo, redo.",
+        {{"type", "object"}, {"properties", {
+            {"calls", {{"type", "array"}, {"maxItems", MAX_BATCH},
+                       {"items", {{"type", "object"}, {"properties", {
+                           {"tool", {{"type", "string"}}},
+                           {"args", {{"type", "object"}}},
+                       }}, {"required", {"tool"}}}}}},
+        }}, {"required", {"calls"}}},
+        Batch,
+    });
     json discard = BoolProp(false, "Discard unsaved changes to the current model.");
     tools->push_back({
         "new_document",

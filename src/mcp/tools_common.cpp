@@ -20,6 +20,20 @@ std::string H(hEntity h)     { return Hex("e:", h.v, 8); }
 std::string H(hConstraint h) { return Hex("c:", h.v, 4); }
 std::string H(hStyle h)      { return Hex("s:", h.v, 4); }
 
+double Round(double v) {
+    // Model values come out of the solver with noise like 19.999999999997;
+    // a micrometre is far below anything that matters, and the shorter
+    // numbers keep results small.
+    double r = std::round(v * 1e6) / 1e6;
+    return (r == 0) ? 0 : r;   // no "-0"
+}
+
+std::string ColorHex(RgbaColor c) {
+    char buf[16];
+    snprintf(buf, sizeof(buf), "#%02x%02x%02x", c.red, c.green, c.blue);
+    return buf;
+}
+
 static uint32_t ParseHandle(const json &j, const char *prefix, const char *what) {
     if(!j.is_string()) throw ToolError(std::string(what) + " handle must be a string");
     std::string s = j;
@@ -108,7 +122,28 @@ Vector Vec3(const json &j, const char *what) {
     return Vector::From(Num(j[0], what), Num(j[1], what), Num(j[2], what));
 }
 
-json Vec(Vector v) { return json::array({v.x, v.y, v.z}); }
+json Vec(Vector v) { return json::array({Round(v.x), Round(v.y), Round(v.z)}); }
+
+bool Verbose(const json &args) { return args.value("verbose", false); }
+
+Vector AxisArg(const json &j, const char *what) {
+    if(j.is_string()) {
+        std::string s = j;
+        for(char &ch : s) ch = (char)tolower(ch);
+        if(s.size() == 1) s = "+" + s;
+        if(s == "+x") return Vector::From( 1,  0,  0);
+        if(s == "-x") return Vector::From(-1,  0,  0);
+        if(s == "+y") return Vector::From( 0,  1,  0);
+        if(s == "-y") return Vector::From( 0, -1,  0);
+        if(s == "+z") return Vector::From( 0,  0,  1);
+        if(s == "-z") return Vector::From( 0,  0, -1);
+        throw ToolError(std::string(what) + " must be one of +x, -x, +y, -y, +z, -z "
+                        "or a vector [x, y, z]");
+    }
+    Vector v = Vec3(j, what);
+    if(v.Magnitude() < LENGTH_EPS) throw ToolError(std::string(what) + " can't be zero");
+    return v.WithMagnitude(1);
+}
 
 Frame FrameOf(hEntity wrkpl) {
     Entity *wp = SK.GetEntity(wrkpl);
@@ -306,8 +341,8 @@ json GroupJson(Group *g) {
     if(g->allowRedundant)   j["allow_redundant"] = true;
     if(g->IsMeshGroup() || g->type == Group::Type::DRAWING_WORKPLANE) {
         j["combine"] = CombineName(g->meshCombine);
-        j["color"]   = {g->color.redF(), g->color.greenF(), g->color.blueF()};
-        j["opacity"] = g->color.alphaF();
+        j["color"]   = ColorHex(g->color);
+        if(g->color.alpha != 255) j["opacity"] = Round(g->color.alphaF());
     }
     const char *sub = SubtypeName(g->subtype);
     switch(g->type) {
@@ -317,7 +352,7 @@ json GroupJson(Group *g) {
             // The top copy is translated by 2*vector (one-sided); a two-sided
             // extrusion goes from -vector to +vector. Either way the total
             // length is 2*|vector|.
-            j["depth"] = 2 * v.Magnitude();
+            j["depth"] = Round(2 * v.Magnitude());
             j["direction"] = Vec(v.WithMagnitude(1));
             break;
         }
@@ -325,11 +360,11 @@ json GroupJson(Group *g) {
         case Group::Type::HELIX: {
             if(sub) j["sides"] = sub;
             double theta = SK.GetParam(hg.param(3))->val;
-            j["angle_deg"] = Deg(4 * theta);
+            j["angle_deg"] = Round(Deg(4 * theta));
             j["axis_point"] = Vec(SK.VectorFrom(hg.param(0), hg.param(1), hg.param(2)));
             j["axis_direction"] = Vec(SK.VectorFrom(hg.param(4), hg.param(5), hg.param(6)));
             if(g->type == Group::Type::HELIX) {
-                j["axial_travel"] = 2 * SK.GetParam(hg.param(7))->val;
+                j["axial_travel"] = Round(2 * SK.GetParam(hg.param(7))->val);
                 if(g->valB != 0.0) j["pitch"] = g->valB;
             }
             break;
@@ -337,7 +372,7 @@ json GroupJson(Group *g) {
         case Group::Type::ROTATE: {
             if(sub) j["sides"] = sub;
             j["count"] = (int)g->valA;
-            j["angle_step_deg"] = Deg(4 * SK.GetParam(hg.param(3))->val);
+            j["angle_step_deg"] = Round(Deg(4 * SK.GetParam(hg.param(3))->val));
             j["axis_point"] = Vec(SK.VectorFrom(hg.param(0), hg.param(1), hg.param(2)));
             j["axis_direction"] = Vec(SK.VectorFrom(hg.param(4), hg.param(5), hg.param(6)));
             j["skip_first"] = g->skipFirst;
@@ -366,39 +401,41 @@ json ActiveWorkplaneJson() {
             {"u_axis", Vec(f.u)}, {"v_axis", Vec(f.v)}, {"normal", Vec(f.n)}};
 }
 
-json EntityJson(Entity *e) {
+json EntityJson(Entity *e, bool verbose) {
     json j;
     j["handle"] = H(e->h);
     j["type"]   = EntityTypeName(e->type);
+    bool construction = e->construction;
     if(e->h.isFromRequest()) {
         j["request"] = H(e->h.request());
         Request *r = SK.request.FindByIdNoOops(e->h.request());
-        if(r) j["construction"] = r->construction;
-    } else if(e->construction) {
-        j["construction"] = true;
+        if(r) construction = r->construction;
     }
+    if(construction || verbose) j["construction"] = construction;
     bool inWorkplane = e->workplane != Entity::FREE_IN_3D &&
                        SK.entity.FindByIdNoOops(e->workplane) != NULL;
     Frame f;
     if(inWorkplane) {
         f = FrameOf(e->workplane);
-        j["workplane"] = H(e->workplane);
+        if(verbose) j["workplane"] = H(e->workplane);
     }
+    // Compact: points in a workplane give [u, v] only; verbose adds [x, y, z].
+    auto Coords = [&](json *pj, Vector p) {
+        if(inWorkplane) (*pj)["uv"] = Uv(f, p);
+        if(verbose || !inWorkplane) (*pj)["xyz"] = Vec(p);
+    };
     auto PointJson = [&](hEntity hp) {
-        Vector p = SK.GetEntity(hp)->PointGetNum();
-        json pj = {{"handle", H(hp)}, {"xyz", Vec(p)}};
-        if(inWorkplane) pj["uv"] = f.To2d(p);
+        json pj = {{"handle", H(hp)}};
+        Coords(&pj, SK.GetEntity(hp)->PointGetNum());
         return pj;
     };
 
     if(e->IsPoint()) {
-        Vector p = e->PointGetNum();
-        j["xyz"] = Vec(p);
-        if(inWorkplane) j["uv"] = f.To2d(p);
+        Coords(&j, e->PointGetNum());
     } else if(e->IsNormal()) {
         j["direction"] = Vec(e->NormalN());
     } else if(e->IsDistance()) {
-        j["value"] = e->DistanceGetNum();
+        j["value"] = Round(e->DistanceGetNum());
     } else if(e->IsFace()) {
         j["normal"] = Vec(e->FaceGetNormalNum());
         j["point"]  = Vec(e->FaceGetPointNum());
@@ -416,13 +453,13 @@ json EntityJson(Entity *e) {
                 Vector a = SK.GetEntity(e->point[0])->PointGetNum(),
                        b = SK.GetEntity(e->point[1])->PointGetNum();
                 j["points"] = {PointJson(e->point[0]), PointJson(e->point[1])};
-                j["length"] = a.Minus(b).Magnitude();
+                j["length"] = Round(a.Minus(b).Magnitude());
                 break;
             }
             case Entity::Type::CIRCLE:
                 j["center"] = PointJson(e->point[0]);
-                j["radius"] = e->CircleGetRadiusNum();
-                j["normal"] = Vec(e->Normal()->NormalN());
+                j["radius"] = Round(e->CircleGetRadiusNum());
+                if(verbose || !inWorkplane) j["normal"] = Vec(e->Normal()->NormalN());
                 break;
             case Entity::Type::ARC_OF_CIRCLE: {
                 double thetaa, thetab, dtheta;
@@ -430,9 +467,9 @@ json EntityJson(Entity *e) {
                 j["center"] = PointJson(e->point[0]);
                 j["start"]  = PointJson(e->point[1]);
                 j["end"]    = PointJson(e->point[2]);
-                j["radius"] = e->CircleGetRadiusNum();
-                j["sweep_deg"] = Deg(dtheta);
-                j["normal"] = Vec(e->Normal()->NormalN());
+                j["radius"] = Round(e->CircleGetRadiusNum());
+                j["sweep_deg"] = Round(Deg(dtheta));
+                if(verbose || !inWorkplane) j["normal"] = Vec(e->Normal()->NormalN());
                 break;
             }
             case Entity::Type::CUBIC:
@@ -480,8 +517,8 @@ json ConstraintJson(Constraint *c) {
         if(c->type == Constraint::Type::DIAMETER && c->other) {
             j["shown_as"] = "radius";
         }
-        j["value"]     = v;
-        j["reference"] = c->reference;
+        j["value"]     = Round(v);
+        if(c->reference) j["reference"] = true;
         if(!c->expression.empty()) j["expression"] = c->expression;
     }
     if(c->type == Constraint::Type::RELATION) j["expression"] = c->expression;
@@ -489,16 +526,96 @@ json ConstraintJson(Constraint *c) {
     return j;
 }
 
-json RequestJson(hRequest hr) {
+json RequestJson(hRequest hr, bool verbose) {
     Request *r = SK.GetRequest(hr);
-    json ents = json::array();
-    for(Entity &e : SK.entity) {
-        if(!e.h.isFromRequest() || e.h.request() != hr) continue;
-        if(e.IsNormal() || e.IsDistance()) continue;
-        ents.push_back(EntityJson(&e));
+    if(verbose) {
+        json ents = json::array();
+        for(Entity &e : SK.entity) {
+            if(!e.h.isFromRequest() || e.h.request() != hr) continue;
+            if(e.IsNormal() || e.IsDistance()) continue;
+            ents.push_back(EntityJson(&e, true));
+        }
+        return {{"request", H(hr)}, {"type", r->DescriptionString()},
+                {"construction", r->construction}, {"entities", ents}};
     }
-    return {{"request", H(hr)}, {"type", r->DescriptionString()},
-            {"construction", r->construction}, {"entities", ents}};
+    // Compact: the main entity (entity 0) with its points.
+    Entity *e = SK.entity.FindByIdNoOops(hr.entity(0));
+    if(e == NULL) return {{"request", H(hr)}};
+    json j = EntityJson(e, false);
+    j["entity"] = j["handle"];
+    j.erase("handle");
+    j["request"] = H(hr);
+    return j;
+}
+
+json FaceInfo::Json() const {
+    json j = {{"handle", H(face)}, {"group", H(group)}, {"normal", Vec(normal)}};
+    if(onSurface) {
+        j["center"] = Vec(center);
+        j["bounds"] = {{"min", Vec(bmin)}, {"max", Vec(bmax)}};
+        j["area"]   = Round(area);
+    } else {
+        j["point"] = Vec(point);
+        j["on_surface"] = false;
+    }
+    Entity *e = SK.entity.FindByIdNoOops(face);
+    if(e && e->point[0].v && SK.entity.FindByIdNoOops(e->point[0])) {
+        j["vertex"] = H(e->point[0]);
+    }
+    return j;
+}
+
+std::vector<FaceInfo> GetFaceInfos(const std::vector<hEntity> &faces) {
+    std::vector<FaceInfo> out;
+    std::map<uint32_t, size_t> index;
+    for(hEntity hf : faces) {
+        Entity *f = SK.GetEntity(hf);
+        FaceInfo fi;
+        fi.face   = hf;
+        fi.group  = f->group;
+        fi.point  = f->FaceGetPointNum();
+        fi.normal = f->FaceGetNormalNum().WithMagnitude(1);
+        index[hf.v] = out.size();
+        out.push_back(fi);
+    }
+    // The triangles of the solid (as of the active group) that came from a
+    // face tell where the face is, and which way is out of the solid.
+    std::vector<Vector> nsum(out.size(), Vector::From(0, 0, 0)),
+                        csum(out.size(), Vector::From(0, 0, 0));
+    Group *g = SK.GetGroup(SS.GW.activeGroup);
+    g->GenerateDisplayItems();
+    for(const STriangle &tr : g->displayMesh.l) {
+        auto it = index.find(tr.meta.face);
+        if(it == index.end()) continue;
+        FaceInfo &fi = out[it->second];
+        Vector cr = tr.b.Minus(tr.a).Cross(tr.c.Minus(tr.a));
+        double a = cr.Magnitude() / 2;
+        if(a < LENGTH_EPS * LENGTH_EPS) continue;
+        if(!fi.onSurface) {
+            fi.bmin = fi.bmax = tr.a;
+            fi.onSurface = true;
+        }
+        for(Vector p : {tr.a, tr.b, tr.c}) {
+            fi.bmin = Vector::From(min(fi.bmin.x, p.x), min(fi.bmin.y, p.y), min(fi.bmin.z, p.z));
+            fi.bmax = Vector::From(max(fi.bmax.x, p.x), max(fi.bmax.y, p.y), max(fi.bmax.z, p.z));
+        }
+        nsum[it->second] = nsum[it->second].Plus(cr);
+        csum[it->second] = csum[it->second].Plus(tr.a.Plus(tr.b).Plus(tr.c).ScaledBy(a / 3));
+        fi.area += a;
+    }
+    for(size_t i = 0; i < out.size(); i++) {
+        FaceInfo &fi = out[i];
+        if(!fi.onSurface) continue;
+        fi.center = csum[i].ScaledBy(1 / fi.area);
+        // Face entities of an extrusion's top and bottom share one normal;
+        // the mesh's triangles face out of the solid.
+        if(nsum[i].Dot(fi.normal) < 0) fi.normal = fi.normal.ScaledBy(-1);
+    }
+    return out;
+}
+
+FaceInfo GetFaceInfo(hEntity hf) {
+    return GetFaceInfos({hf})[0];
 }
 
 json IntProp(int lo, int hi, int dflt, const char *desc) {
@@ -589,6 +706,33 @@ void SelectOnly(const Handles &h) {
     for(hConstraint hc : h.constraints) SS.GW.MakeSelected(hc);
 }
 
+void ViewPreset(const std::string &name, Vector *right, Vector *up) {
+    Vector X = Vector::From(1, 0, 0), Y = Vector::From(0, 1, 0), Z = Vector::From(0, 0, 1);
+    // projRight x projUp points at the viewer.
+    if(name == "top")         { *right = X;               *up = Y; }
+    else if(name == "bottom") { *right = X;               *up = Y.ScaledBy(-1); }
+    else if(name == "front")  { *right = X;               *up = Z; }
+    else if(name == "back")   { *right = X.ScaledBy(-1);  *up = Z; }
+    else if(name == "right")  { *right = Y;               *up = Z; }
+    else if(name == "left")   { *right = Y.ScaledBy(-1);  *up = Z; }
+    else if(name == "iso") {
+        // From (+1, -1, +1): front, right and top all visible.
+        *right = Vector::From(1, 1, 0).WithMagnitude(1);
+        *up    = Vector::From(-1, 1, 2).WithMagnitude(1);
+    } else {
+        throw ToolError("Unknown view '" + name + "'; use iso, front, back, left, right, "
+                        "top or bottom");
+    }
+}
+
+GraphicsWindow::DrawOccludedAs HiddenLinesArg(const json &j) {
+    std::string s = j.get<std::string>();
+    if(s == "invisible") return GraphicsWindow::DrawOccludedAs::INVISIBLE;
+    if(s == "stippled")  return GraphicsWindow::DrawOccludedAs::STIPPLED;
+    if(s == "visible")   return GraphicsWindow::DrawOccludedAs::VISIBLE;
+    throw ToolError("hidden_lines must be invisible, stippled or visible");
+}
+
 void ThrowIfErrors() {
     if(activeMessageCapture == NULL || activeMessageCapture->errors.empty()) return;
     std::string text;
@@ -628,6 +772,7 @@ const std::vector<Tool> &GetTools() {
         AddSketchTools(&tools);
         AddConstraintTools(&tools);
         AddOperationTools(&tools);
+        AddViewTools(&tools);
     }
     return tools;
 }

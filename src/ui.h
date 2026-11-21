@@ -668,6 +668,9 @@ public:
     Vector UnProjectPoint3(Vector p);
 
     Platform::TimerRef animateTimer;
+    // If set, called once with the next frame drawn in the window (before
+    // the toolbar is overlaid), then cleared.
+    std::function<void(std::shared_ptr<Pixmap>)> onFrameCaptured;
     void AnimateOnto(Quaternion quatf, Vector offsetf);
     void AnimateOntoWorkplane();
 

@@ -102,6 +102,26 @@ static void Finish(Group *g, ToolResult *res) {
 //-----------------------------------------------------------------------------
 // extrude
 //-----------------------------------------------------------------------------
+// The end faces of an extrusion: "top" at the far end along the extrusion
+// vector, "bottom" at the other end (the sketch's plane, if one-sided).
+static void AddExtrusionFaces(hGroup hg, json *out) {
+    Group *g = SK.GetGroup(hg);
+    Vector d = g->ExtrusionGetVector();
+    if(d.Magnitude() < LENGTH_EPS) return;
+    d = d.WithMagnitude(1);
+    hEntity top = Entity::NO_ENTITY, bottom = Entity::NO_ENTITY;
+    double tmax = -VERY_POSITIVE, tmin = VERY_POSITIVE;
+    for(Entity &e : SK.entity) {
+        if(e.group != hg || !e.IsFace()) continue;
+        if(fabs(fabs(e.FaceGetNormalNum().WithMagnitude(1).Dot(d)) - 1) > 1e-9) continue;
+        double t = e.FaceGetPointNum().Dot(d);
+        if(t > tmax) { tmax = t; top = e.h; }
+        if(t < tmin) { tmin = t; bottom = e.h; }
+    }
+    if(!top.v || top == bottom) return;
+    (*out)["faces"] = {{"top", GetFaceInfo(top).Json()}, {"bottom", GetFaceInfo(bottom).Json()}};
+}
+
 static void Extrude(const json &args, ToolResult *res) {
     UseSourceSketch(args);
     double depth = args.contains("depth") ? Num(args["depth"], "depth") : 10;
@@ -140,11 +160,15 @@ static void Extrude(const json &args, ToolResult *res) {
             c.ptA       = e.point[0];
             c.ptB       = e.point[1];
             c.valA      = fabs(depth);
-            Constraint::AddConstraint(&c, /*rememberForUndo=*/false);
+            hConstraint hc = Constraint::AddConstraint(&c, /*rememberForUndo=*/false);
+            res->structured["depth_constraint"] = H(hc);
             break;
         }
     }
+    json depthConstraint = res->structured.value("depth_constraint", json());
     Finish(SK.GetGroup(hg), res);
+    if(!depthConstraint.is_null()) res->structured["depth_constraint"] = depthConstraint;
+    AddExtrusionFaces(hg, &res->structured);
     t.Commit();
 }
 
@@ -344,8 +368,10 @@ void AddOperationTools(std::vector<Tool> *tools) {
         "extrude",
         "Extrude the active (or given) workplane sketch's closed profiles normal to "
         "its workplane into a solid, as a new group. depth in mm; negative extrudes "
-        "the other way. By default the depth is fixed by a distance constraint, so "
-        "the group is fully constrained (change it with set_constraint_value).",
+        "the other way. By default the depth is fixed by a distance constraint "
+        "(depth_constraint; change it with set_constraint_value), so the group is "
+        "fully constrained. The result's faces.top / faces.bottom are the end faces "
+        "(top: the far end), for create_workplane_sketch(face=...).",
         {{"type", "object"}, {"properties", {
             {"sketch", sketch},
             {"depth", NumProp("Depth in mm (default 10).")},
