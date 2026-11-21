@@ -347,7 +347,7 @@ MenuBarRef GetOrCreateMainMenu(bool *unique) {
 // Cocoa NSView and NSWindow extensions
 //-----------------------------------------------------------------------------
 
-@interface SSView : NSOpenGLView
+@interface SSView : NSOpenGLView <NSTextViewDelegate>
 @property Platform::Window *receiver;
 
 @property BOOL acceptsFirstResponder;
@@ -356,6 +356,9 @@ MenuBarRef GetOrCreateMainMenu(bool *unique) {
 - (void)startEditing:(NSString *)text at:(NSPoint)origin
         withHeight:(double)fontHeight minWidth:(double)minWidth
         usingMonospace:(BOOL)isMonospace;
+- (void)startMultilineEditing:(NSString *)text at:(NSPoint)origin width:(double)width
+        maxHeight:(double)maxHeight fontHeight:(double)fontHeight focus:(BOOL)focus;
+- (void)moveMultilineEditorTo:(NSPoint)origin width:(double)width maxHeight:(double)maxHeight;
 - (void)stopEditing;
 - (void)didEdit:(NSString *)text;
 
@@ -369,6 +372,14 @@ MenuBarRef GetOrCreateMainMenu(bool *unique) {
 {
     NSTrackingArea     *trackingArea;
     NSTextField        *editor;
+    // The multi-line editor (see Window::ShowMultilineEditor), made when first needed.
+    NSScrollView       *multiEditorScroll;
+    NSTextView         *multiEditor;
+    BOOL               multiEditing;
+    NSPoint            multiEditorOrigin;
+    double             multiEditorWidth;
+    double             multiEditorMaxHeight;
+    double             multiEditorReportedHeight;
     double             magnificationGestureCurrentZ;
     double             rotationGestureCurrent;
     Point2d            trackpadPositionShift;
@@ -776,6 +787,9 @@ MenuBarRef GetOrCreateMainMenu(bool *unique) {
 
 - (void)startEditing:(NSString *)text at:(NSPoint)origin withHeight:(double)fontHeight
         minWidth:(double)minWidth usingMonospace:(BOOL)isMonospace {
+    if(multiEditing) {
+        [self stopEditing];
+    }
     if(!editing) {
         [self addSubview:editor];
         editing = YES;
@@ -803,10 +817,146 @@ MenuBarRef GetOrCreateMainMenu(bool *unique) {
     [[self window] makeKeyWindow];
 }
 
+- (void)startMultilineEditing:(NSString *)text at:(NSPoint)origin width:(double)width
+        maxHeight:(double)maxHeight fontHeight:(double)fontHeight focus:(BOOL)focus {
+    if(editing && !multiEditing) {
+        [self stopEditing];
+    }
+    if(!multiEditor) {
+        multiEditorScroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(0, 0, 100, 20)];
+        multiEditorScroll.hasVerticalScroller = YES;
+        multiEditorScroll.hasHorizontalScroller = NO;
+        multiEditorScroll.autohidesScrollers = YES;
+        multiEditorScroll.borderType = NSNoBorder;
+
+        NSSize size = multiEditorScroll.contentSize;
+        multiEditor = [[NSTextView alloc] initWithFrame:NSMakeRect(0, 0, size.width, size.height)];
+        multiEditor.minSize = NSMakeSize(0, 0);
+        multiEditor.maxSize = NSMakeSize(FLT_MAX, FLT_MAX);
+        multiEditor.verticallyResizable = YES;
+        multiEditor.horizontallyResizable = NO;
+        multiEditor.autoresizingMask = NSViewWidthSizable;
+        multiEditor.textContainer.containerSize = NSMakeSize(size.width, FLT_MAX);
+        multiEditor.textContainer.widthTracksTextView = YES;
+        multiEditor.textContainerInset = NSMakeSize(0, 1);
+        multiEditor.richText = NO;
+        multiEditor.importsGraphics = NO;
+        multiEditor.allowsUndo = YES;
+        multiEditor.automaticQuoteSubstitutionEnabled = NO;
+        multiEditor.automaticDashSubstitutionEnabled = NO;
+        multiEditor.automaticTextReplacementEnabled = NO;
+        multiEditor.delegate = self;
+        multiEditorScroll.documentView = multiEditor;
+    }
+    if(!multiEditing) {
+        [self addSubview:multiEditorScroll];
+        editing = YES;
+        multiEditing = YES;
+        multiEditorReportedHeight = -1;
+    }
+
+    NSFont *font = [NSFont fontWithName:@"Monaco" size:fontHeight];
+    multiEditor.font = font;
+    multiEditor.typingAttributes = @{ NSFontAttributeName: font,
+                                      NSForegroundColorAttributeName: [NSColor textColor] };
+    if(![multiEditor.string isEqualToString:text]) {
+        multiEditor.string = text;
+        // (A new text, e.g. after sending: the old one can't be undone into.)
+        [multiEditor.undoManager removeAllActions];
+    }
+    multiEditorOrigin = origin;
+    multiEditorWidth = width;
+    multiEditorMaxHeight = maxHeight;
+    [self layoutMultilineEditor];
+
+    if(focus) {
+        [[self window] makeFirstResponder:multiEditor];
+        [[self window] makeKeyWindow];
+    }
+}
+
+- (void)moveMultilineEditorTo:(NSPoint)origin width:(double)width maxHeight:(double)maxHeight {
+    if(!multiEditing) return;
+    multiEditorOrigin = origin;
+    multiEditorWidth = width;
+    multiEditorMaxHeight = maxHeight;
+    [self layoutMultilineEditor];
+}
+
+// Sizes the multi-line editor to its text, and tells the receiver if its height or
+// text changed.
+- (void)layoutMultilineEditor {
+    // Lay the text out at the editor's width first, then measure it.
+    NSRect frame = NSMakeRect(multiEditorOrigin.x, multiEditorOrigin.y,
+                              multiEditorWidth, multiEditorScroll.frame.size.height);
+    if(!NSEqualRects(frame, multiEditorScroll.frame)) {
+        multiEditorScroll.frame = frame;
+    }
+    NSSize size = multiEditorScroll.contentSize;
+    if(multiEditor.frame.size.width != size.width) {
+        [multiEditor setFrameSize:NSMakeSize(size.width, multiEditor.frame.size.height)];
+    }
+
+    NSLayoutManager *layoutManager = multiEditor.layoutManager;
+    [layoutManager ensureLayoutForTextContainer:multiEditor.textContainer];
+    double textHeight = [layoutManager usedRectForTextContainer:multiEditor.textContainer].size.height;
+    textHeight = std::max(textHeight, (double)[layoutManager defaultLineHeightForFont:multiEditor.font]);
+    double height = ceil(textHeight + 2 * multiEditor.textContainerInset.height);
+    height = std::min(height, std::max(multiEditorMaxHeight, 10.0));
+
+    frame.size.height = height;
+    if(!NSEqualRects(frame, multiEditorScroll.frame)) {
+        multiEditorScroll.frame = frame;
+    }
+    [multiEditor scrollRangeToVisible:multiEditor.selectedRange];
+
+    if(height != multiEditorReportedHeight) {
+        multiEditorReportedHeight = height;
+        if(receiver->onEditorChanged) {
+            receiver->onEditorChanged(multiEditor.string.UTF8String, height);
+        }
+    }
+}
+
+- (void)textDidChange:(NSNotification *)notification {
+    double height = multiEditorReportedHeight;
+    [self layoutMultilineEditor];
+    if(height == multiEditorReportedHeight && receiver->onEditorChanged) {
+        // Only the text changed.
+        receiver->onEditorChanged(multiEditor.string.UTF8String, height);
+    }
+}
+
+- (BOOL)textView:(NSTextView *)textView doCommandBySelector:(SEL)selector {
+    if(textView != multiEditor) return NO;
+
+    if(selector == @selector(insertNewline:)) {
+        if([NSEvent modifierFlags] & (NSEventModifierFlagShift | NSEventModifierFlagOption)) {
+            [textView insertNewlineIgnoringFieldEditor:self];
+        } else if(receiver->onEditingDone) {
+            std::string text = textView.string.UTF8String;
+            receiver->onEditingDone(text);
+        }
+        return YES;
+    } else if(selector == @selector(cancelOperation:) || selector == @selector(complete:)) {
+        // Escape: as in the single-line editor, not word completion.
+        [self cancelOperation:self];
+        return YES;
+    }
+    return NO;
+}
+
 - (void)stopEditing {
     if(editing) {
-        [editor removeFromSuperview];
-        [[self window] makeFirstResponder:self];
+        if(multiEditing) {
+            BOOL hadFocus = ([[self window] firstResponder] == multiEditor);
+            [multiEditorScroll removeFromSuperview];
+            multiEditing = NO;
+            if(hadFocus) [[self window] makeFirstResponder:self];
+        } else {
+            [editor removeFromSuperview];
+            [[self window] makeFirstResponder:self];
+        }
         editing = NO;
     }
 }
@@ -1310,6 +1460,17 @@ public:
                     bool isMonospace, const std::string &text) override {
         [ssView startEditing:Wrap(text) at:(NSPoint){(CGFloat)x, (CGFloat)y}
             withHeight:fontHeight minWidth:minWidth usingMonospace:isMonospace];
+    }
+
+    void ShowMultilineEditor(double x, double y, double width, double maxHeight,
+                             double fontHeight, const std::string &text, bool focus) override {
+        [ssView startMultilineEditing:Wrap(text) at:(NSPoint){(CGFloat)x, (CGFloat)y}
+            width:width maxHeight:maxHeight fontHeight:fontHeight focus:focus];
+    }
+
+    void MoveEditor(double x, double y, double width, double maxHeight) override {
+        [ssView moveMultilineEditorTo:(NSPoint){(CGFloat)x, (CGFloat)y}
+            width:width maxHeight:maxHeight];
     }
 
     void HideEditor() override {

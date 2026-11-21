@@ -238,6 +238,7 @@ void TextWindow::Init() {
 
             using namespace std::placeholders;
             window->onClose = []() {
+                SS.TW.HideChatInput();
                 SS.TW.HideEditControl();
                 SS.GW.showTextWindow = false;
                 SS.GW.EnsureValidActives();
@@ -281,6 +282,7 @@ void TextWindow::Init() {
             // (dragging), so it is the only platform that calls this, to update the menu.
             window->onDockSideChanged = std::bind(&GraphicsWindow::EnsureValidActives, &SS.GW);
             window->onEditingDone = std::bind(&TextWindow::EditControlDone, this, _1);
+            window->onEditorChanged = std::bind(&TextWindow::ChatInputChanged, this, _1, _2);
             window->onScrollbarAdjusted = std::bind(&TextWindow::ScrollbarEvent, this, _1);
             window->SetMinContentSize(370, 370);
         }
@@ -293,8 +295,10 @@ void TextWindow::ClearSuper() {
     // Ugly hack, but not so ugly as the next line
     Platform::WindowRef oldWindow = std::move(window);
     std::shared_ptr<ViewportCanvas> oldCanvas = std::move(canvas);
-    // Stay in the chat (e.g. when the user undoes what Claude did).
+    // Stay in the chat (e.g. when the user undoes what Claude did), with its
+    // input open.
     bool inChat = (shown.screen == Screen::CHAT);
+    auto chatInputKept = chatInput;
 
     // Cannot use *this = {} here because TextWindow instances
     // are 2.4MB long; this causes stack overflows in prologue
@@ -305,7 +309,10 @@ void TextWindow::ClearSuper() {
     // Return old canvas
     window = std::move(oldWindow);
     canvas = std::move(oldCanvas);
-    if(inChat) shown.screen = Screen::CHAT;
+    if(inChat) {
+        shown.screen = Screen::CHAT;
+        chatInput = chatInputKept;
+    }
 
     HideEditControl();
 
@@ -318,6 +325,8 @@ void TextWindow::ClearSuper() {
 
 void TextWindow::HideEditControl() {
     editControl.colorPicker.show = false;
+    // The chat's input stays open; HideChatInput() closes it.
+    if(chatInput.open) return;
     if(window) {
         window->HideEditor();
         window->Invalidate();
@@ -325,6 +334,8 @@ void TextWindow::HideEditControl() {
 }
 
 void TextWindow::ShowEditControl(int col, const std::string &str, int halfRow) {
+    // This takes the window's editor from the chat's input, if it has it.
+    chatInput.open = false;
     if(halfRow < 0) halfRow = top[hoveredRow];
     editControl.halfRow = halfRow;
     editControl.col = col;
@@ -575,8 +586,8 @@ void TextWindow::Show() {
     auto const &gs = SS.GW.gs;
 
     // The chat follows its newest text if it was scrolled to the bottom.
-    bool wasAtBottom = (rows > 0 && scrollPos >= top[rows-1] + 2 - halfRows - 1);
-    chatInputHalfRow = -1;
+    bool wasAtBottom = (rows > 0 && scrollPos >= ScrollBottom() - ScrollPage() - 1);
+    footerRow = -1;
 
     // Make sure these tests agree with test used to draw indicator line on
     // main list of groups screen.
@@ -630,22 +641,58 @@ void TextWindow::Show() {
         }
     }
 
-    bool chatShown = (chatInputHalfRow >= 0 || shown.screen == Screen::CHAT) &&
-                     !SS.GW.pending.description;
-    if(chatShown && window && !window->IsEditorVisible() &&
-       (wasAtBottom || chatOpenEditor)) {
-        scrollPos = top[rows-1] + 2;    // clamped to the bottom by Resize()
+    // The chat's input is pinned to the bottom, below the transcript.
+    bool chatShown = (shown.screen == Screen::CHAT) && !SS.GW.pending.description &&
+                     SS.chat.send;
+    if(chatShown) {
+        ShowChatFooter();
+        if(wasAtBottom || chatInput.scrollToBottom) {
+            scrollPos = ScrollBottom();     // clamped to the bottom by Resize()
+        }
+        chatInput.scrollToBottom = false;
     }
 
     if(window) Resize();
 
-    if(chatOpenEditor && chatShown && window) {
-        chatOpenEditor = false;
-        if(chatInputHalfRow >= 0) {
-            edit.meaning = Edit::CHAT_MESSAGE;
-            ShowEditControl(4, "", chatInputHalfRow);
+    if(window) {
+        if(chatShown) {
+            PlaceChatInput(chatInput.focus);
+            chatInput.focus = false;
+        } else {
+            HideChatInput();
         }
     }
+}
+
+int TextWindow::FooterHeight() {
+    if(footerRow < 0 || footerRow >= rows) return 0;
+    int px = (top[rows-1] + 2 - top[footerRow])*(LINE_HEIGHT/2);
+    // The chat's editor may be taller than the row it's on.
+    if(chatInput.open && chatInput.row == rows - 1) {
+        px += max(0, (int)ceil(chatInput.height) + 2 - LINE_HEIGHT);
+    }
+    return px + 6;      // and a margin below
+}
+
+int TextWindow::ScrollBottom() {
+    if(rows <= 0) return 0;
+    if(footerRow >= 0 && footerRow < rows) return top[footerRow];
+    return top[rows-1] + 2;
+}
+
+int TextWindow::ScrollPage() {
+    int hh = LINE_HEIGHT/2;
+    return max(1, halfRows - (FooterHeight() + hh - 1)/hh);
+}
+
+int TextWindow::RowY(int r) {
+    int hh = LINE_HEIGHT/2;
+    if(footerRow >= 0 && r >= footerRow && window) {
+        double width, height;
+        window->GetContentSize(&width, &height);
+        return (int)height - FooterHeight() + (top[r] - top[footerRow])*hh;
+    }
+    return (top[r] - scrollPos)*hh;
 }
 
 void TextWindow::Resize()
@@ -655,13 +702,14 @@ void TextWindow::Resize()
 
     halfRows = (int)height / (LINE_HEIGHT/2);
 
-    int bottom = top[rows-1] + 2;
-    scrollPos = min(scrollPos, bottom - halfRows);
+    int bottom = ScrollBottom();
+    int page = ScrollPage();
+    scrollPos = min(scrollPos, bottom - page);
     scrollPos = max(scrollPos, 0);
 
-    window->ConfigureScrollbar(0, top[rows - 1] + 1, halfRows);
+    window->ConfigureScrollbar(0, bottom - 1, page);
     window->SetScrollbarPosition(scrollPos);
-    window->SetScrollbarVisible(top[rows - 1] + 1 > halfRows);
+    window->SetScrollbarVisible(bottom - 1 > page);
     window->Invalidate();
 }
 
@@ -1070,16 +1118,33 @@ void TextWindow::Paint() {
     uiCanvas.canvas = canvas;
     uiCanvas.flip = true;
 
+    // The chat's editor follows the footer when the window is resized; and
+    // if something else closed it (e.g. docking), it's opened again.
+    if(chatInput.open) {
+        if(window->IsEditorVisible()) {
+            PlaceChatInput(/*focus=*/false);
+        } else {
+            chatInput.open = false;
+            SS.ScheduleShowTW();
+        }
+    }
+
+    // The rows that scroll stop above the footer, if there's one.
+    int footerTop = (footerRow >= 0) ? RowY(footerRow) : (int)height;
+
     int r, c, a;
     for(a = 0; a < 2; a++) {
         for(r = 0; r < rows; r++) {
-            int ltop = top[r];
-            if(ltop < (scrollPos-1)) continue;
-            if(ltop > scrollPos+halfRows) break;
+            if(footerRow < 0 || r < footerRow) {
+                int ltop = top[r];
+                if(ltop < (scrollPos-1)) continue;
+                if(ltop > scrollPos+halfRows) continue;
+                if(footerRow >= 0 && RowY(r) + LINE_HEIGHT > footerTop) continue;
+            }
 
             for(c = 0; c < min(((int)width/CHAR_WIDTH_)+1, (int) MAX_COLS); c++) {
                 int x = LEFT_MARGIN + c*CHAR_WIDTH_;
-                int y = (ltop-scrollPos)*(LINE_HEIGHT/2) + 4;
+                int y = RowY(r) + 4;
 
                 int fg = meta[r][c].fg;
                 int bg = meta[r][c].bg;
@@ -1174,6 +1239,14 @@ void TextWindow::Paint() {
         uiCanvas.DrawLine(x, y, x, y+40, color);
     }
 
+    // A line above the footer.
+    if(footerRow >= 0) {
+        RgbaColor color = RgbaColor::FromFloat(fgColorTable['g'*3+0],
+                                               fgColorTable['g'*3+1],
+                                               fgColorTable['g'*3+2]);
+        uiCanvas.DrawLine(0, footerTop - 2, (int)width, footerTop - 2, color);
+    }
+
     // The header has some icons that are drawn separately from the text
     DrawOrHitTestIcons(&uiCanvas, PAINT, 0, 0);
 
@@ -1188,7 +1261,11 @@ void TextWindow::Paint() {
 void TextWindow::MouseEvent(bool leftClick, bool leftDown, double x, double y) {
     using Platform::Window;
 
-    if(SS.TW.window->IsEditorVisible() || SS.GW.window->IsEditorVisible()) {
+    // (The chat's input, left open, doesn't stop the rest of the window from
+    // working; another editor closes when the user clicks elsewhere.)
+    bool fieldEditor = (window->IsEditorVisible() && !chatInput.open) ||
+                       SS.GW.window->IsEditorVisible();
+    if(fieldEditor) {
         if(DrawOrHitTestColorPicker(NULL, leftClick ? CLICK : HOVER, leftDown, x, y)) {
             return;
         }
@@ -1212,15 +1289,24 @@ void TextWindow::MouseEvent(bool leftClick, bool leftDown, double x, double y) {
     hoveredRow = 0;
     hoveredCol = 0;
 
-    // Find the corresponding character in the text buffer
+    // Find the corresponding character in the text buffer: in the footer, or
+    // in the rows that scroll.
     int c = (int)((x - LEFT_MARGIN) / CHAR_WIDTH_);
     int hh = (LINE_HEIGHT)/2;
-    y += scrollPos*hh;
     int r;
-    for(r = 0; r < rows; r++) {
-        if(y >= top[r]*hh && y <= (top[r]+2)*hh) {
-            break;
+    if(footerRow >= 0 && y >= RowY(footerRow)) {
+        for(r = footerRow; r < rows; r++) {
+            if(y >= RowY(r) && y <= RowY(r) + 2*hh) break;
         }
+    } else {
+        int last = (footerRow >= 0) ? footerRow : rows;
+        double sy = y + scrollPos*hh;
+        for(r = 0; r < last; r++) {
+            if(sy >= top[r]*hh && sy <= (top[r]+2)*hh) {
+                break;
+            }
+        }
+        if(r == last) r = rows;
     }
     if(r >= 0 && c >= 0 && r < rows && c < MAX_COLS) {
         window->SetCursor(Window::Cursor::POINTER);
@@ -1259,7 +1345,7 @@ void TextWindow::MouseEvent(bool leftClick, bool leftDown, double x, double y) {
             while(start > 0 && meta[r][start - 1].tooltip == tooltip) start--;
             while(end + 1 < MAX_COLS && meta[r][end + 1].tooltip == tooltip) end++;
             window->SetTooltip(tooltips[tooltip],
-                               LEFT_MARGIN + start*CHAR_WIDTH_, (top[r] - scrollPos)*hh,
+                               LEFT_MARGIN + start*CHAR_WIDTH_, RowY(r),
                                (end - start + 1)*CHAR_WIDTH_, LINE_HEIGHT);
         } else {
             window->SetTooltip("", 0, 0, 0, 0);
@@ -1291,13 +1377,14 @@ void TextWindow::ScrollbarEvent(double newPos) {
     // See Paint().
     if(window == NULL) return;
 
-    if(window->IsEditorVisible()) {
-        // An edit field is active. Do not move the scrollbar.
+    if(window->IsEditorVisible() && !chatInput.open) {
+        // An edit field is active. Do not move the scrollbar. (The chat's
+        // input is in the footer, which doesn't scroll.)
         return;
     }
 
-    int bottom = top[rows-1] + 2;
-    newPos = min((int)newPos, bottom - halfRows);
+    int bottom = ScrollBottom();
+    newPos = min((int)newPos, bottom - ScrollPage());
     newPos = max((int)newPos, 0);
     if(newPos != scrollPos) {
         scrollPos = (int)newPos;

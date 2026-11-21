@@ -10,21 +10,22 @@ namespace SolveSpace {
 
 void TextWindow::ScreenShowChat(int link, uint32_t v) {
     SS.TW.GoToScreen(Screen::CHAT);
-    // Ready to type, unless Claude is still replying.
-    SS.TW.chatOpenEditor = !SS.chat.busy;
+    // Ready to type.
+    SS.TW.chatInput.focus = true;
+    SS.TW.chatInput.scrollToBottom = true;
 }
 
 void TextWindow::ScreenChatAction(int link, uint32_t v) {
     switch(link) {
         case 'm':   // the input line
-            SS.TW.chatOpenEditor = true;
+            SS.TW.chatInput.focus = true;
             break;
         case 's':
             if(SS.chat.interrupt) SS.chat.interrupt();
             break;
         case 'n':
             if(SS.chat.reset) SS.chat.reset();
-            SS.TW.chatOpenEditor = true;
+            SS.TW.chatInput.focus = true;
             break;
     }
 }
@@ -189,14 +190,103 @@ void TextWindow::ShowChat() {
         }
     }
 
-    Printf(false, "");
-    if(SS.chat.busy) {
-        Printf(false, "%Fg   working...%E  %Fl%Ls%f[stop]%E", &ScreenChatAction);
-    } else {
-        Printf(false, "%Bd %Fl>%E  %Fl%Lm%f[click here to type a message]%E",
+    // (The input is in the footer; see ShowChatFooter().)
+}
+
+// The chat's footer, pinned to the bottom of the window: a line of status,
+// which doesn't change height (so the input doesn't jump), and the input.
+void TextWindow::ShowChatFooter() {
+    footerRow = rows;
+    if(SS.chat.pending > 0) {
+        std::string queued = (SS.chat.pending > 1)
+                             ? ssprintf(" (%d more queued)", SS.chat.pending - 1) : "";
+        Printf(false, "%Fg   working...%s%E  %Fl%Ls%f[stop]%E", queued.c_str(),
                &ScreenChatAction);
-        chatInputHalfRow = top[rows - 1];
+    } else {
+        Printf(false, "%Fg   Enter sends, Shift+Enter starts a new line%E");
     }
+    // Clicking the prompt gives the input the keyboard (or opens it, where
+    // the platform has no editor that can stay open).
+    Printf(false, " %Fl%Lm%f>%E", &ScreenChatAction);
+    chatInput.row = rows - 1;
+}
+
+void TextWindow::PlaceChatInput(bool focus) {
+    if(!window || footerRow < 0) return;
+
+    double width, height;
+    window->GetContentSize(&width, &height);
+    double x = LEFT_MARGIN + 3*CHAR_WIDTH_;
+    double y = RowY(chatInput.row) + 2;
+    double w = max(100.0, width - x - 20);
+    // Up to about a third of the window, then the editor scrolls.
+    double maxHeight = max((double)LINE_HEIGHT, floor(height / 3));
+
+    bool moved = (x != chatInput.x || y != chatInput.y || w != chatInput.width ||
+                  maxHeight != chatInput.maxHeight);
+    chatInput.x         = x;
+    chatInput.y         = y;
+    chatInput.width     = w;
+    chatInput.maxHeight = maxHeight;
+
+    if(chatInput.open && window->IsEditorVisible()) {
+        if(focus) {
+            window->ShowMultilineEditor(x, y, w, maxHeight, LINE_HEIGHT - 4,
+                                        SS.chat.draft, /*focus=*/true);
+        } else if(moved) {
+            window->MoveEditor(x, y, w, maxHeight);
+        }
+    } else {
+        // (Open before showing it, so that the size it reports is taken.)
+        chatInput.open = true;
+        window->ShowMultilineEditor(x, y, w, maxHeight, LINE_HEIGHT - 4,
+                                    SS.chat.draft, focus);
+        // Platforms without a multi-line editor only open one to type in.
+        chatInput.open = window->IsEditorVisible();
+    }
+}
+
+void TextWindow::HideChatInput() {
+    if(!chatInput.open) return;
+    chatInput.open = false;
+    if(window) {
+        window->HideEditor();
+        window->Invalidate();
+    }
+}
+
+void TextWindow::ChatInputChanged(const std::string &text, double height) {
+    if(!chatInput.open) return;
+    SS.chat.draft = text;
+    if(height == chatInput.height) return;
+
+    // The footer grows (or shrinks) upwards with the editor.
+    bool atBottom = (scrollPos >= ScrollBottom() - ScrollPage() - 1);
+    chatInput.height = height;
+    if(atBottom) scrollPos = ScrollBottom();
+    if(window) {
+        Resize();
+        PlaceChatInput(/*focus=*/false);
+    }
+}
+
+void TextWindow::ChatInputDone(std::string text) {
+    // Without trailing blank lines; and nothing to send if it's all blank.
+    size_t end = text.find_last_not_of(" \t\r\n");
+    if(end == std::string::npos) return;
+    text.erase(end + 1);
+
+    // Empty the input, keeping it open to write the next message.
+    SS.chat.draft.clear();
+    if(window) {
+        window->ShowMultilineEditor(chatInput.x, chatInput.y, chatInput.width,
+                                    chatInput.maxHeight, LINE_HEIGHT - 4, "",
+                                    /*focus=*/true);
+        chatInput.open = window->IsEditorVisible();
+    }
+    chatInput.scrollToBottom = true;
+    if(SS.chat.send) SS.chat.send(text);
+    SS.ScheduleShowTW();
 }
 
 } // namespace SolveSpace

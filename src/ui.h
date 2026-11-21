@@ -258,6 +258,19 @@ public:
 
     int top[MAX_ROWS]; // in half-line units, or -1 for unused
     int rows;
+    // The rows from footerRow on are a footer, drawn at the bottom of the
+    // window instead of scrolling with the rest (the chat's input); -1 if
+    // the screen has none.
+    int footerRow = -1;
+
+    // The height of the footer, in pixels, and in half-rows (rounded up).
+    int FooterHeight();
+    // The half-row just past the rows that scroll, and how many half-rows
+    // of them fit above the footer.
+    int ScrollBottom();
+    int ScrollPage();
+    // The top of row r, in pixels from the top of the window.
+    int RowY(int r);
 
     Platform::WindowRef window;
     std::shared_ptr<ViewportCanvas> canvas;
@@ -390,9 +403,7 @@ public:
         // For named parameters
         PARAM_NAME            = 810,
         PARAM_VALUE           = 811,
-        LINK_PARAM_VALUE      = 812,
-        // For the chat with Claude
-        CHAT_MESSAGE          = 900
+        LINK_PARAM_VALUE      = 812
     };
     struct {
         bool        showAgain;
@@ -439,11 +450,23 @@ public:
     void ShowEditView();
     void ShowTangentArc();
     void ShowChat();
-    // Opens the chat's message editor at the next ShowChat() (when entering
-    // the screen, or after the user clicks the input line).
-    bool chatOpenEditor = false;
-    // Where ShowChat() put the input line, or -1 if it didn't.
-    int chatInputHalfRow = -1;
+    void ShowChatFooter();
+    // The chat's input: a multi-line editor in the footer, left open while
+    // the chat is shown (HideEditControl() leaves it alone), so that the user
+    // can write while Claude replies and while working in the graphics window.
+    // Its text is kept in SS.chat.draft as it changes.
+    struct {
+        bool    open;           // the editor is shown for it
+        bool    focus;          // give it the keyboard at the next Show()
+        bool    scrollToBottom; // show the newest text at the next Show()
+        int     row;            // the footer row it's on
+        double  height;         // its height in pixels, as the editor reports
+        double  x, y, width, maxHeight;     // where it was put
+    } chatInput = {};
+    void PlaceChatInput(bool focus);
+    void HideChatInput();
+    void ChatInputChanged(const std::string &text, double height);
+    void ChatInputDone(std::string text);
     // Special screen, based on selection
     void DescribeSelection();
 

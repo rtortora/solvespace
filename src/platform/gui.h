@@ -244,6 +244,8 @@ public:
     std::function<void(SixDofEvent)>    onSixDofEvent;
     std::function<bool(KeyboardEvent)>  onKeyboardEvent;
     std::function<void(std::string)>    onEditingDone;
+    // Called by the multi-line editor with its text and height, when either changes.
+    std::function<void(const std::string &, double)> onEditorChanged;
     std::function<void(double)>         onScrollbarAdjusted;
     std::function<void()>               onContextLost;
     std::function<void()>               onRender;
@@ -288,6 +290,21 @@ public:
     virtual void ShowEditor(double x, double y, double fontHeight, double minWidth,
                             bool isMonospace, const std::string &text) = 0;
     virtual void HideEditor() = 0;
+    // A multi-line editor for writing a message: Enter ends the editing (onEditingDone),
+    // Shift+Enter adds a line. Its top-left corner is at (x, y) and it is `width` wide;
+    // it is as tall as its text, from one line up to maxHeight, and then scrolls. It
+    // reports its text and height through onEditorChanged as they change. If it's already
+    // shown, it's moved, and its text is replaced only if `text` differs. It takes the
+    // keyboard focus only if `focus` is set.
+    // Platforms without one fall back to the single-line editor, opened only for `focus`.
+    virtual void ShowMultilineEditor(double x, double y, double width, double maxHeight,
+                                     double fontHeight, const std::string &text, bool focus) {
+        if(focus) {
+            ShowEditor(x, y + fontHeight + 2, fontHeight, width, /*isMonospace=*/true, text);
+        }
+    }
+    // Moves the multi-line editor, keeping its text.
+    virtual void MoveEditor(double x, double y, double width, double maxHeight) {}
 
     virtual void SetScrollbarVisible(bool visible) = 0;
     virtual void ConfigureScrollbar(double min, double max, double pageSize) = 0;

@@ -677,7 +677,10 @@ public:
     struct {
         std::vector<ChatEntry> entries;
         bool        running;        // the claude process is running
-        bool        busy;           // a reply is in progress
+        // Replies still to come: a message sent during a reply is queued by
+        // Claude and answered after it.
+        int         pending;
+        std::string draft;          // what the user is writing
         std::string status;         // e.g. "claude-opus-5-5, solvespace connected"
 
         // Sends a message, starting Claude (and the MCP server) if needed.

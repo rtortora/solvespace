@@ -511,7 +511,8 @@ static void HandleMessage(const json &msg) {
             }
         }
     } else if(type == "result") {
-        SS.chat.busy = false;
+        // One for each message sent (Claude answers queued ones in turn).
+        SS.chat.pending = std::max(0, SS.chat.pending - 1);
         if(!readyStatus.empty()) SS.chat.status = readyStatus;
         streamingEntry = -1;
         std::string subtype = msg.value("subtype", "");
@@ -574,7 +575,7 @@ static void Pump() {
                 session.reset();
                 RemoveConfigFile();
                 SS.chat.running = false;
-                SS.chat.busy    = false;
+                SS.chat.pending = 0;
                 SS.chat.status  = "not running";
                 streamingEntry  = -1;
                 break;
@@ -683,8 +684,9 @@ static bool Start() {
     return true;
 }
 
+// May be called during a reply: Claude queues the message and answers it
+// after the reply (stopping the reply doesn't drop it).
 static void Send(const std::string &text) {
-    if(SS.chat.busy) return;
     AddEntry(SolveSpaceUI::ChatEntry::Kind::USER, text);
     if(!session && !Start()) {
         ShowChanges();
@@ -695,12 +697,12 @@ static void Send(const std::string &text) {
         { "message", { { "role", "user" }, { "content", text } } },
     };
     WriteLine(session, msg.dump() + "\n");
-    SS.chat.busy = true;
+    SS.chat.pending++;
     ShowChanges();
 }
 
 static void Interrupt() {
-    if(!session || !SS.chat.busy) return;
+    if(!session || SS.chat.pending == 0) return;
     interrupted = true;
     json msg = {
         { "type", "control_request" },
@@ -719,7 +721,7 @@ static void EndSession() {
     }
     RemoveConfigFile();
     SS.chat.running = false;
-    SS.chat.busy    = false;
+    SS.chat.pending = 0;
     streamingEntry  = -1;
 }
 

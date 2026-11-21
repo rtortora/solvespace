@@ -354,25 +354,32 @@ running SolveSpace through its own MCP server.
   in the chat, and `TW.ClearSuper()` (undo, new file), stay in the chat.
   The screen follows new text when scrolled to the bottom, wraps to the
   window width, and shows only the newest ~3960 lines (the text window's row
-  limit). Input uses the text window's single-line edit control on the `>`
-  row; it opens on entering the chat and when the row is clicked. Typing is
-  disabled while Claude replies, because the edit control can't move with
-  the text and blocks scrolling while open.
+  limit).
+* **Input, pinned to the bottom.** The text window has an optional footer
+  (`TW.footerRow`): rows from it on are drawn at the bottom of the window,
+  not scrolled (`RowY`, `ScrollBottom`, `ScrollPage`, `FooterHeight`). The
+  chat's footer is a status line of constant height (`working... [stop]`,
+  with the number queued, or a hint) and the `>` input line.
+  The input is a multi-line editor (`Window::ShowMultilineEditor`,
+  `MoveEditor`, `onEditorChanged`; on macOS an `NSTextView` in an
+  `NSScrollView`): Enter sends, Shift/Option+Enter adds a line, it grows
+  upwards to a third of the window and then scrolls. It stays open while the
+  chat is shown (`TW.chatInput`; `HideEditControl()` leaves it alone, so
+  clicks in the graphics window, undo, `delete` and `ClearSuper()` don't close
+  it) and the transcript scrolls while it's open. Its text is kept in
+  `SS.chat.draft` as it changes, so leaving the chat or a pending operation
+  (which hide it) doesn't lose it. Other platforms fall back to the
+  single-line editor, opened by clicking `>` (not compiled yet).
+* **Typing while Claude replies.** `SS.chat.pending` counts replies still to
+  come. The CLI queues a message sent mid-reply and answers it as its own
+  turn, with its own `result` (checked); an interrupt's response reports
+  `still_queued`, so **stop** should only stop the current reply (not
+  checked with a message actually queued).
 * **Not done:** Windows (the backend reports "not available"; it needs
-  `CreateProcess` with pipes); multi-line input; Markdown rendering;
-  approving tools other than SolveSpace's.
-* **Possible follow-up: typing while Claude replies.** The CLI queues a
-  message sent mid-reply and answers it afterwards (checked). Needed:
-  (1) put the `>` input between the history and the current exchange, so
-  streamed text grows away from it and it only moves on Enter (then reopen
-  it at the new row); (2) make `SS.chat.busy` a count of replies still to
-  come; (3) keep the status to one line, so the rows above the input don't
-  shift; (4) don't close the chat's edit box in `DeleteTaggedRequests` and
-  `TW.ClearSuper()`, which MCP `delete`, `undo`, `new_document` and
-  `open_file` reach. Remaining limit: the text window can't scroll while
-  the edit box is open, so a long reply is cut off until the box is closed,
-  which discards the draft. Fixing that needs a per-platform "get editor
-  text" so the box can be moved without losing it.
+  `CreateProcess` with pipes); Markdown rendering; approving tools other than
+  SolveSpace's. Probably: Cmd+C/V/Z in the input reach SolveSpace's menu
+  rather than the text (as in the old single-line editor); Esc in the input
+  clears the selection rather than handing the keyboard back to the model.
 
 ---
 

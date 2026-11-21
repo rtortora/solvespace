@@ -1112,6 +1112,10 @@ void TextWindow::ShowTangentArc() {
 // The edit control is visible, and the user just pressed enter.
 //-----------------------------------------------------------------------------
 void TextWindow::EditControlDone(std::string s) {
+    if(chatInput.open) {
+        ChatInputDone(s);
+        return;
+    }
     edit.showAgain = false;
 
     switch(edit.meaning) {
@@ -1314,12 +1318,6 @@ void TextWindow::EditControlDone(std::string s) {
 
         case Edit::STEP_DIM_STEPS:
             stepDim.steps = min(300, max(1, atoi(s.c_str())));
-            break;
-
-        case Edit::CHAT_MESSAGE:
-            if(SS.chat.send && !s.empty()) {
-                SS.chat.send(s);
-            }
             break;
 
         case Edit::TANGENT_ARC_RADIUS:
