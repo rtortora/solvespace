@@ -9,15 +9,15 @@ back, screenshots, camera and display control.
 ## Start here (for a fresh session)
 
 1. Read §0 (state, how to run and test) and §3 (lessons; several were bugs).
-2. Check the working tree is clean (`git status`). Everything up to
-   Milestone 1 is committed (see "Commits so far" in §0).
-3. Build and run the tests (§0) to confirm the baseline: 25 MCP tests and
+2. Check the working tree is clean (`git status`). See "Commits so far" in
+   §0 for what is committed.
+3. Build and run the tests (§0) to confirm the baseline: 31 MCP tests and
    SolveSpace's 300 tests should pass.
-4. The next task is **Milestone 7, selection, analysis and export** (§5). §1
-   explains the architecture; §1.4 has the patterns for writing tools.
+4. The next task is **Milestone 8, headless mode, CI and MCP resources**
+   (§5). §1 explains the architecture; §1.4 has the patterns for writing
+   tools.
 
-Remaining milestones, in order: **7** (selection, analysis, export), **8**
-(headless/CI, MCP resources). The optional 5b/6 follow-ups in §5 are small
+Remaining milestone: **8** (headless/CI, MCP resources). The optional 5b/6 follow-ups in §5 are small
 and can be done any time. Milestone 1's configuration screen still needs a
 look by hand (§5).
 
@@ -28,9 +28,9 @@ look by hand (§5).
 | | |
 |---|---|
 | Branch | `mcp-server` (from `main`; the upstream main branch is `master`) |
-| Done | Milestone 0 (vertical slice), **1 (settings, token, clean shutdown)**, 2–5 (documents/groups, sketching, constraints, 3D operations), 5b (modelling ergonomics) and 6 (view, navigation, display, styles). 63 tools. |
-| Not done | 7 (selection/analysis/export; **next**), 8 (headless/CI) |
-| Tests | `test/mcp/mcp_tests.py`: 25 end-to-end tests against a live GUI, all passing, including the chair as an acceptance test. SolveSpace's own suite (`cmake --build build --target test_solvespace`): 300 cases passing. |
+| Done | Milestone 0 (vertical slice), 1 (settings, token, clean shutdown), 2–5 (documents/groups, sketching, constraints, 3D operations), 5b (modelling ergonomics), 6 (view, navigation, display, styles) and **7 (selection, picking, measurement, mesh checks, export, run_command)**. 72 tools. |
+| Not done | 8 (headless/CI; **next**) |
+| Tests | `test/mcp/mcp_tests.py`: 31 end-to-end tests against a live GUI, all passing, including the chair as an acceptance test. SolveSpace's own suite (`cmake --build build --target test_solvespace`): 300 cases passing. |
 | Field test | Claude modelled a kitchen chair over MCP: 16 calls and three ~70-point listings. With 5b, the same chair (`test_chair_acceptance`) takes 3 calls (one `batch`, a summary, a 3-view screenshot) and ~11 KB of text results, every group at 0 DOF. |
 | Platforms | Only the macOS build has been compiled and run. The GTK, Windows and Qt changes are small and mechanical but have not been compiled. |
 
@@ -88,10 +88,13 @@ python3 test/mcp/mcp_smoke.py --url ...              # milestone 0 smoke test
 
 `--out` collects saved `.slvs` files and screenshots (`extrude_cut.png`,
 `revolve.png`, `helix.png`, `translate.png`, `view_*.png`, `chair_*.png`,
-`window.png`, ...). Look at them: a test that passes can still render wrongly.
+`window.png`, `box.*` exports, ...). Look at them: a test that passes can
+still render wrongly.
 
 **Quitting a test instance:** quit it by PID, e.g.
 `osascript -l JavaScript -e "ObjC.import('AppKit'); $.NSRunningApplication.runningApplicationWithProcessIdentifier(PID).terminate"`.
+Call `new_document {discard_unsaved: true}` first: the tests leave an unsaved
+document, and quitting then opens a "save changes?" prompt on the screen.
 `tell application "SolveSpace" to quit` picks an app by name and may quit the
 user's own copy instead.
 
@@ -120,7 +123,8 @@ The tool name is the positional parameter `_tool`, so that tools taking a
    style tools.
 5. `b0cd6c83` Milestone 1: settings, configuration screen, token, clean
    shutdown.
-6. Handoff update (this file).
+6. `e6b7d1f6` Handoff update.
+7. Milestone 7 (uncommitted at the time of writing).
 
 ---
 
@@ -291,6 +295,8 @@ src/mcp/tools_ops.cpp           extrude (with end faces), lathe, revolve, helix,
                                 rotate/translate copies, link_file
 src/mcp/tools_view.cpp          view/camera, display options, units, perspective,
                                 exploded sketch, styles (milestone 6)
+src/mcp/tools_analysis.cpp      selection, pick_at, measure, mesh checks, export,
+                                run_command (milestone 7)
 src/util.{h,cpp}                MessageCapture hook in MessageBox()
 src/ui.h, src/draw.cpp          GraphicsWindow::onFrameCaptured (window screenshots)
 src/file.cpp                    LocateImportedFile: no prompt while capturing
@@ -309,7 +315,7 @@ test/mcp/                       mcp_client.py, mcp_smoke.py, mcp_tests.py
 
 ---
 
-## 2. Tool reference (63 tools)
+## 2. Tool reference (72 tools)
 
 | Area | Tools |
 |---|---|
@@ -321,6 +327,9 @@ test/mcp/                       mcp_client.py, mcp_smoke.py, mcp_tests.py
 | Constraints | `add_constraint {type, points, entities, value, reference, supplementary}` (types: distance, diameter, angle, coincident, on_entity, equal, ratio, difference, horizontal, vertical, parallel, tangent, perpendicular, symmetric, midpoint, same_orientation, lock), `set_constraint_value`, `set_constraint_reference`, `add_comment`, `set_parameter`, `add_relation` |
 | 3D ops | `extrude {depth, sides, combine, constrain_depth}` (returns `depth_constraint` and `faces.top/bottom`), `lathe {axis, axis_point}`, `revolve {angle_deg}`, `helix {angle_deg, pitch \| axial_travel}`, `rotate_copy {center, axis, count, angle_deg}`, `translate_copy {step, count}`, `link_file {path}` |
 | View (M6) | `get_view`, `set_view {center \| offset, proj_right, proj_up, scale}`, `orient_view {preset: iso/front/back/left/right/top/bottom/workplane/nearest_ortho/nearest_iso, zoom_to_fit}`, `zoom {factor}`, `zoom_to_fit {handles?}`, `pan {dx, dy \| by}`, `rotate_view {axis, angle_deg}`, `center_on {point}`, `set_perspective {enabled, factor}`, `set_explode_sketch {enabled, distance}`, `set_units {mm/m/in/ft_in}` |
+| Selection (M7) | `get_selection {verbose}` (items plus counts by kind), `select {handles, mode: replace/add/remove}`, `clear_selection`, `add_constraint {use_selection: true}`, `pick_at {x, y, view_index, source: screenshot/window, select: none/replace/add}` |
+| Analysis (M7) | `measure {group?, faces?, entities?}` (solid volume, surface area, centre of mass, bounds; group's own volume; sketch region area/perimeter; face areas; curve lengths), `check_naked_edges {group?, limit, show}`, `check_interference {group?, limit, show}` |
+| Export, commands (M7) | `export {path, kind: solid/mesh/view/section/wireframe/image, overwrite, view, constraints, face, width, height, zoom_to_fit}`, `run_command {name, handles?}` (an allowlist of 59 menu commands) |
 | Display, styles (M6) | `set_display_options {workplanes, normals, points, construction, constraints: none/all/dimensions, shaded, faces, edges, outlines, mesh, snap_grid, dim_solid, hidden_lines}` (no arguments: read them), `list_styles`, `create_style {name, color, width, width_units, visible, stipple}`, `set_style_properties {style, ...}`, `set_style {handles, style}` |
 
 Behaviour worth knowing:
@@ -368,6 +377,37 @@ Behaviour worth knowing:
   which use the View menu and animate. `rotate_view`: positive angles turn the
   model counter-clockwise seen from the axis's positive end. `pan {dx, dy}`
   moves the model on screen by pixels; `pan {by}` moves the view centre.
+* **Selection (M7)** is the GUI's own and is shared with the user. Tools that
+  drive menus through the selection (`add_constraint`, groups, ...) replace
+  it, then clear it, as the GUI does.
+* **`pick_at` (M7)** hit-tests exactly as the mouse does
+  (`HitTestMakeSelection`), using the camera saved by the last `screenshot`
+  (each image of a multi-view one; `ShotView`/`lastScreenshot` in
+  `mcptools.h`), then puts the GUI's camera and hover back. It also ray-casts
+  the solid's mesh for the 3D point and face under the pixel, whether or not
+  faces are selectable in the GUI.
+* **`measure`, the checks and `export` (M7) use the solid as of the active
+  group** (`measure` and the checks take `group`, which must not come after
+  the active one).
+* **`export` (M7)** never opens a dialog and refuses to replace a file without
+  `overwrite`. Mesh export is a copy of `ExportMeshTo` that reports naked
+  edges as a `warning` instead of an `Error()`. Exports switch on
+  `exportMode` (finer chord tolerance) and regenerate; the tool switches it
+  off and regenerates again afterwards, as Esc does in the GUI. View exports
+  hide constraints unless `constraints: true`. `view` presets temporarily
+  turn the camera. PNG export renders offscreen (like `screenshot`), not from
+  the window as File > Export Image does. **A section is not a cut:**
+  SolveSpace's Export 2d Section only outputs the solid's faces lying *in*
+  the plane (`MakeEdgesInPlaneInto`, `MakeSectionEdgesInto`), so a plane
+  through the middle of a solid gives an empty file.
+* **`run_command` (M7)** is an allowlist, not the planned blocklist:
+  commands that open dialogs (file, export, link, configuration, paste
+  transformed, stop tracing), wait for clicks (drawing tools, comment,
+  relation) or are covered by other tools (undo/redo, new/open/save) aren't
+  in it. Model-changing commands run in a `Transaction`; the result lists
+  added groups/requests/constraints, the solve status and the selection.
+  `immediatelyEditDimension` is switched off so a dimension doesn't open the
+  value editor.
 * **Saved settings:** `set_units` and `set_perspective` change values
   SolveSpace saves at exit. The perspective factor is the configuration
   screen's (0.3 typical; stored as `cameraTangent = factor/1000`).
@@ -445,6 +485,15 @@ Behaviour worth knowing:
     end faces.
   * Screenshot `views` (up to 6), `units`, and (from M6) `highlight`, `shaded`,
     `hidden_lines`, `source: "window"`.
+* **M7, selection, analysis and export.** As planned, except:
+  * `measure` returns everything that applies in one call rather than taking
+    a `volume|area|...` choice.
+  * `add_constraint {use_selection}` was added for "constrain what I've
+    selected".
+  * `run_command` uses an allowlist (§2).
+  * Not done: the export settings (chord tolerance, export scale, offset,
+    canvas size) can't be changed from MCP; they are the configuration
+    screen's.
 * **M6, view and display.** As planned, except:
   * `set_style_visibility` became `set_style_properties` (visibility,
     colour, width, stipple, name), and `create_style` was added, since custom
@@ -467,19 +516,7 @@ Done (see §4); what couldn't be checked from here:
   clipboard.
 * GTK3/GTK4/Windows/Qt/HTML `SetClipboardText` haven't been compiled.
 
-### Milestone 7 — Selection, picking, analysis and export (do this next)
-
-* `select`, `clear_selection`, `get_selection` (so the user can say
-  "constrain what I've selected").
-* `pick_at {x, y}` on the last screenshot.
-* `measure {volume|area|perimeter|center_of_mass}`, `check_interference`,
-  `check_naked_edges`. (A bounding box is now in `get_model_summary`.)
-* `export {step|stl|obj|dxf|svg|pdf|png, path}`, using the `Export*` functions
-  with explicit paths, so no file dialogs open.
-* `run_command {name}`: an escape hatch, with a blocklist for commands that
-  open dialogs.
-
-### Milestone 8 — Headless mode, CI and MCP resources
+### Milestone 8 — Headless mode, CI and MCP resources (do this next)
 
 * `solvespace-cli mcp [file]`: the same registry over stdio, with no window.
   Screenshots already use Cairo. The `test/` harness could then run
@@ -495,8 +532,10 @@ Done (see §4); what couldn't be checked from here:
   option to return only some results would trim it further.
 * Polylines with an angled first segment in a non-aligned workplane, and
   circles there, are left with free position (noted in the result).
-* `find_faces` and `solid_bounds` look at the solid **as of the active
-  group**; activate the last group to search the whole model.
+* `find_faces`, `solid_bounds`, `measure` and `export` look at the solid
+  **as of the active group**; activate the last group to see the whole model.
+* M7: export settings (chord tolerance, export scale, cutter offset, canvas
+  size) as `export` arguments or a settings tool.
 
 ---
 

@@ -26,6 +26,8 @@ Conventions:
 - Handles are strings: g:<hex> group, r:<hex> request, e:<hex> entity, c:<hex> constraint.
 - Each modifying call is a single undo step (see undo / redo). A call that fails leaves the model unchanged.
 
+The user's selection in the window is shared: get_selection reads it (for "this" or "what I've selected"), select sets it, and add_constraint {use_selection:true} constrains it. pick_at tells what is at a pixel of the last screenshot. measure gives volume, areas, lengths and centre of mass; check_naked_edges / check_interference validate the solid; export writes STEP, STL, SVG, DXF, PDF, PNG, ... to a path without dialogs.
+
 Check results with get_model_summary (includes the solid's bounding box), list_entities, and visually with screenshot {views:["iso","front","right"]}, which renders without moving the user's view. Results are compact; pass verbose=true for full detail.)";
 
 static const char *UnitName(Unit u) {
@@ -229,7 +231,7 @@ static std::string Base64(const std::vector<uint8_t> &data) {
     return out;
 }
 
-static std::vector<uint8_t> EncodePng(const std::shared_ptr<Pixmap> &pixmap) {
+std::vector<uint8_t> EncodePng(const std::shared_ptr<Pixmap> &pixmap) {
     // Pixmap only writes PNGs to files, so go through a temporary file.
     std::vector<uint8_t> png;
     FILE *tmp = tmpfile();
@@ -256,22 +258,13 @@ static json CameraJson(const Camera &camera) {
             {"offset", Vec(camera.offset)}, {"scale", camera.scale}};
 }
 
-struct RenderOptions {
-    int         width, height;
-    bool        zoomToFit;
-    bool        mmUnits;
-    bool        setShaded;
-    bool        shaded;
-    bool        setOccluded;
-    GraphicsWindow::DrawOccludedAs occluded;
-    Handles     highlight;
-};
+std::vector<ShotView> lastScreenshot;
 
 // Renders the model offscreen with Cairo, from the given view preset (or
 // the GUI's camera for "current"), leaving the GUI's view and display
 // settings as they were.
-static std::shared_ptr<Pixmap> RenderOffscreen(const std::string &view,
-                                               const RenderOptions &o, json *viewJson) {
+std::shared_ptr<Pixmap> RenderOffscreen(const std::string &view, const RenderOptions &o,
+                                        json *viewJson, Camera *usedCamera) {
     GraphicsWindow &gw = SS.GW;
     Vector savedOffset = gw.offset, savedRight = gw.projRight, savedUp = gw.projUp;
     double savedScale  = gw.scale;
@@ -338,6 +331,7 @@ static std::shared_ptr<Pixmap> RenderOffscreen(const std::string &view,
 
     *viewJson = CameraJson(camera);
     (*viewJson)["name"] = view;
+    if(usedCamera) *usedCamera = camera;
     return pixmap;
 }
 
@@ -356,6 +350,13 @@ static void ScreenshotWindow(ToolResult *res) {
     double w, h;
     SS.GW.window->GetContentSize(&w, &h);
     double ratio = SS.GW.window->GetDevicePixelRatio();
+    ShotView shot = {};
+    shot.camera     = SS.GW.GetCamera();
+    shot.width      = (int)(w * ratio);
+    shot.height     = (int)(h * ratio);
+    shot.pixelRatio = ratio;
+    shot.shaded     = SS.GW.showShaded;
+    lastScreenshot  = {shot};
     res->structured = {{"source", "window"},
                        {"width", (int)(w * ratio)}, {"height", (int)(h * ratio)},
                        {"view", CameraJson(SS.GW.GetCamera())}};
@@ -430,12 +431,20 @@ static void Screenshot(const json &args, ToolResult *res) {
     Regenerate();
 
     json viewsJson = json::array();
+    std::vector<ShotView> shots;
     for(const std::string &v : views) {
         json vj;
-        std::shared_ptr<Pixmap> pixmap = RenderOffscreen(v, o, &vj);
+        ShotView shot = {};
+        std::shared_ptr<Pixmap> pixmap = RenderOffscreen(v, o, &vj, &shot.camera);
         res->content.push_back(ImageContent(EncodePng(pixmap)));
         viewsJson.push_back(vj);
+        shot.width      = o.width;
+        shot.height     = o.height;
+        shot.pixelRatio = 1;
+        shot.shaded     = o.setShaded ? o.shaded : SS.GW.showShaded;
+        shots.push_back(shot);
     }
+    lastScreenshot = shots;
     res->structured = {{"width", o.width}, {"height", o.height},
                        {"units", units}};
     if(views.size() == 1) {

@@ -21,6 +21,7 @@ void AddSketchTools(std::vector<Tool> *tools);
 void AddConstraintTools(std::vector<Tool> *tools);
 void AddOperationTools(std::vector<Tool> *tools);
 void AddViewTools(std::vector<Tool> *tools);
+void AddAnalysisTools(std::vector<Tool> *tools);
 
 //-----------------------------------------------------------------------------
 // Handles
@@ -147,6 +148,32 @@ void SelectOnly(const Handles &h);
 // top, bottom (Z up; front looks from -Y). Throws for other names.
 void ViewPreset(const std::string &name, Vector *right, Vector *up);
 GraphicsWindow::DrawOccludedAs HiddenLinesArg(const json &j);
+
+// Offscreen rendering (tools_model.cpp), used by screenshot and export.
+struct RenderOptions {
+    int         width, height;
+    bool        zoomToFit;
+    bool        mmUnits;
+    bool        setShaded;
+    bool        shaded;
+    bool        setOccluded;
+    GraphicsWindow::DrawOccludedAs occluded;
+    Handles     highlight;
+};
+// Renders from a view preset, or "current" for the GUI's camera, leaving the
+// GUI's view, display settings and selection as they were.
+std::shared_ptr<Pixmap> RenderOffscreen(const std::string &view, const RenderOptions &o,
+                                        json *viewJson, Camera *usedCamera = NULL);
+std::vector<uint8_t> EncodePng(const std::shared_ptr<Pixmap> &pixmap);
+
+// The cameras of the last screenshot's images, for pick_at.
+struct ShotView {
+    Camera camera;          // logical pixels; image pixels = logical * pixelRatio
+    int    width, height;   // of the image, in pixels
+    double pixelRatio;
+    bool   shaded;
+};
+extern std::vector<ShotView> lastScreenshot;
 
 // Throws a ToolError if anything was captured by Error() since the tool
 // started; used after calling into GUI menu functions.

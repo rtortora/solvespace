@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""End-to-end tests for the SolveSpace MCP server and tools (milestones 0-6).
+"""End-to-end tests for the SolveSpace MCP server and tools (milestones 0-7).
 
 Start SolveSpace with MCP enabled (e.g. SOLVESPACE_MCP_PORT=47475), then:
 
@@ -855,6 +855,172 @@ def test_token():
     assert C.tools()
 
 
+# ---------------------------------------------------------------------------
+# Milestone 7: selection, picking, analysis and export
+# ---------------------------------------------------------------------------
+def box(w=40, d=20, h=10):
+    sk = C.call("create_workplane_sketch")["group"]
+    r = C.call("sketch_rectangle", corner1=[0, 0], corner2=[w, d], constrain=True)
+    ex = C.call("extrude", depth=h)
+    r["group"] = sk
+    return r, ex
+
+
+def test_selection():
+    fresh()
+    C.call("create_workplane_sketch")
+    r = rect([0, 0], [40, 20])
+    top, left = r["edges"]["top"], r["edges"]["left"]
+    s = C.call("select", handles=[top, left])
+    assert s["count"] == 2 and s["by_kind"]["line_segments"] == 2, s
+    s = C.call("select", handles=[left], mode="remove")
+    assert s["count"] == 1 and s["items"][0]["handle"] == top, s
+    s = C.call("get_selection")
+    assert [i["handle"] for i in s["items"]] == [top], s
+    # "Constrain what I've selected."
+    a = C.call("add_constraint", type="distance", use_selection=True, value=50)
+    assert close(a["constraints"][0]["value"], 50), a
+    assert C.call("get_selection")["count"] == 0
+    assert "Nothing is selected" in C.fails("add_constraint", type="distance",
+                                            use_selection=True)
+    assert "not both" in C.fails("add_constraint", type="distance", use_selection=True,
+                                 entities=[top])
+    C.call("select", handles=[top, "c:0001"], mode="add")
+    assert C.call("get_selection")["by_kind"].get("constraints") == 1
+    assert C.call("clear_selection")["count"] == 0
+    assert "Groups can't" in C.fails("select", handles=["g:0002"])
+
+
+def pixel_of(view, p, width, height):
+    """Where a model point lands in a screenshot image (parallel projection)."""
+    d = [p[i] + view["offset"][i] for i in range(3)]
+    dot = lambda a, b: sum(x * y for x, y in zip(a, b))  # noqa: E731
+    return (width / 2 + dot(d, view["proj_right"]) * view["scale"],
+            height / 2 - dot(d, view["proj_up"]) * view["scale"])
+
+
+def test_pick_at():
+    fresh()
+    C.call("create_workplane_sketch")
+    r = rect([0, 0], [40, 20])
+    shot = C.call("screenshot", view="top", width=400, height=300)
+    x, y = pixel_of(shot["view"], [10, 0, 0], 400, 300)
+    p = C.call("pick_at", x=x, y=y, select="replace")
+    assert p["hit"]["handle"] == r["edges"]["bottom"], p
+    assert C.call("get_selection")["items"][0]["handle"] == r["edges"]["bottom"]
+    assert p["surface"] is None, p
+    # Empty space.
+    p = C.call("pick_at", x=5, y=5)
+    assert p["hit"] is None and not p["candidates"], p
+    assert "outside" in C.fails("pick_at", x=401, y=5)
+    # The solid's surface, in the second image of a multi-view screenshot.
+    C.call("extrude", depth=10)
+    shot = C.call("screenshot", views=["iso", "top"], width=320, height=240)
+    x, y = pixel_of(shot["views"][1], [25, 12, 10], 320, 240)
+    p = C.call("pick_at", x=x, y=y, view_index=1)
+    assert close(p["surface"]["point"], [25, 12, 10], 1e-3), p
+    assert close(p["surface"]["normal"], [0, 0, 1]), p
+    assert "view_index" in C.fails("pick_at", x=x, y=y, view_index=2)
+    C.call("clear_selection")
+
+
+def test_measure():
+    fresh()
+    r, ex = box()
+    m = C.call("measure")
+    sol = m["solid"]
+    assert close(sol["volume_mm3"], 8000, 1e-3), m
+    assert close(sol["surface_area_mm2"], 2800, 1e-3), m
+    assert close(sol["center_of_mass"], [20, 10, 5], 1e-6), m
+    assert close(sol["bounds"]["size"], [40, 20, 10]), m
+    m = C.call("measure", group=r["group"], entities=[r["edges"]["top"]])
+    assert close(m["sketch_region"]["area_mm2"], 800), m
+    assert close(m["sketch_region"]["perimeter_mm"], 120), m
+    assert close(m["entities_total_length_mm"], 40), m
+    m = C.call("measure", faces=[ex["faces"]["top"]["handle"]])
+    assert close(m["faces_total_area_mm2"], 800, 1e-6), m
+    assert "isn't a curve" in C.fails("measure", entities=[ex["faces"]["top"]["handle"]])
+    C.call("activate_group", group=r["group"])
+    assert "after the active group" in C.fails("measure", group=ex["handle"])
+
+
+def test_mesh_checks():
+    fresh()
+    box()
+    n = C.call("check_naked_edges")
+    assert n["ok"] and n["watertight"] and not n["self_intersecting"], n
+    assert not C.call("check_interference")["interferes"]
+    # A second, overlapping part, assembled.
+    C.call("create_workplane_sketch", plane="XY")
+    C.call("sketch_rectangle", corner1=[30, 5], corner2=[60, 15])
+    C.call("extrude", depth=10, combine="assemble")
+    i = C.call("check_interference", limit=3, show=True)
+    assert i["interferes"] and i["problem_edges"] > 0 and len(i["edges"]) <= 3, i
+    C.call("run_command", name="unselect_all")   # Esc clears the shown edges
+
+
+def test_export():
+    fresh()
+    box()
+    out = {}
+    for name in ["box.step", "box.stl", "box.obj", "box.html", "box_top.svg",
+                 "box_front.dxf", "box_iso.pdf", "box.png"]:
+        path = os.path.join(OUT, name)
+        if os.path.exists(path):
+            os.remove(path)
+        args = {"path": path}
+        if "_" in name:
+            args["view"] = name.split("_")[1].split(".")[0]
+        out[name] = C.call("export", **args)
+        assert out[name]["bytes"] > 0 and os.path.getsize(path) == out[name]["bytes"], out
+    assert out["box.step"]["kind"] == "solid" and out["box.stl"]["kind"] == "mesh"
+    assert out["box_top.svg"]["kind"] == "view" and out["box.png"]["kind"] == "image"
+    assert out["box.stl"]["triangles"] == 12 and "warning" not in out["box.stl"]
+    with open(os.path.join(OUT, "box.step")) as f:
+        assert f.read().startswith("ISO-10303-21"), "not a STEP file"
+    assert os.path.exists(os.path.join(OUT, "box.mtl"))
+    with open(os.path.join(OUT, "box.png"), "rb") as f:
+        assert f.read(8) == b"\x89PNG\r\n\x1a\n"
+    with open(os.path.join(OUT, "box_top.svg")) as f:
+        assert "<svg" in f.read()
+    # Wireframe, and a section in the plane of the top face (a section is
+    # the solid's faces lying in the plane, not a cut through it).
+    p = os.path.join(OUT, "box_wire.dxf")
+    C.call("export", path=p, kind="wireframe", overwrite=True)
+    C.call("create_workplane_sketch", plane="XY", offset=10)
+    p = os.path.join(OUT, "box_section.svg")
+    sec = C.call("export", path=p, kind="section", overwrite=True)
+    with open(p) as f:
+        assert "<path" in f.read(), "empty section"
+    # Refusals.
+    assert "exists" in C.fails("export", path=os.path.join(OUT, "box.stl"))
+    assert "absolute" in C.fails("export", path="box.stl")
+    assert "Unknown file type" in C.fails("export", path=os.path.join(OUT, "x.doc"))
+    assert "can't hold" in C.fails("export", path=os.path.join(OUT, "x.stl"), kind="view")
+    assert "Couldn't write" in C.fails("export", path="/nonexistent-dir/x.stl")
+    # The model is untouched.
+    assert C.call("get_model_summary")["active_solve"]["status"] == "ok"
+
+
+def test_run_command():
+    fresh()
+    C.call("create_workplane_sketch")
+    ln = C.call("sketch_line", points=[[0, 0], [10, 1]])
+    line = req(ln)["entity"]
+    r = C.call("run_command", name="horizontal", handles=[line])
+    assert r["added"]["constraints"][0]["type"] == "horizontal", r
+    C.call("undo")
+    assert not C.call("list_constraints")["constraints"]
+    r = C.call("run_command", name="distance_diameter", handles=[line])
+    assert len(r["added"]["constraints"]) == 1, r
+    C.call("delete", handles=[line])
+    rect([0, 0], [10, 5])
+    r = C.call("run_command", name="measure_area")
+    assert any("area" in m for m in r.get("messages", [])), r
+    assert "Unknown or unsupported" in C.fails("run_command", name="open")
+    assert "selection" in C.fails("run_command", name="measure_perimeter").lower()
+
+
 TESTS = [
     test_token,
     test_document_and_undo, test_groups, test_delete,
@@ -866,6 +1032,8 @@ TESTS = [
     test_constrained_primitives, test_batch, test_screenshot_views,
     test_view_tools, test_display_and_units, test_styles, test_summary_bounds,
     test_chair_acceptance,
+    test_selection, test_pick_at, test_measure, test_mesh_checks, test_export,
+    test_run_command,
 ]
 
 

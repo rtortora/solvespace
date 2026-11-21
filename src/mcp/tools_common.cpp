@@ -773,6 +773,7 @@ const std::vector<Tool> &GetTools() {
         AddConstraintTools(&tools);
         AddOperationTools(&tools);
         AddViewTools(&tools);
+        AddAnalysisTools(&tools);
     }
     return tools;
 }

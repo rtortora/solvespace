@@ -166,6 +166,19 @@ static void AddConstraint(const json &args, ToolResult *res) {
     if(args.contains("entities")) {
         for(const json &j : args["entities"]) sel.entities.push_back(ParseEntity(j));
     }
+    if(args.value("use_selection", false)) {
+        if(!sel.entities.empty()) {
+            throw ToolError("Give points/entities or use_selection, not both");
+        }
+        // What the user has selected in the GUI (see get_selection).
+        for(GraphicsWindow::Selection &s : SS.GW.selection) {
+            if(s.entity.v) sel.entities.push_back(s.entity);
+        }
+        if(sel.entities.empty()) {
+            throw ToolError("Nothing is selected in SolveSpace (selected constraints "
+                            "don't count)");
+        }
+    }
     if(sel.entities.empty()) throw ToolError("Give the points and/or entities to constrain");
 
     hGroup hg = SS.GW.activeGroup;
@@ -439,6 +452,8 @@ void AddConstraintTools(std::vector<Tool> *tools) {
             {"type", {{"type", "string"}, {"enum", names}}},
             {"points", HandleListSchema("Point entity handles.")},
             {"entities", HandleListSchema("Other entity handles (lines, circles, ...).")},
+            {"use_selection", BoolProp(false,
+                "Constrain what is selected in SolveSpace's window instead of points/entities.")},
             {"value", {{"description", "Dimension value (mm or degrees), or an expression."}}},
             {"reference", BoolProp(false, "Reference dimension (measures only).")},
             {"supplementary", BoolProp(false,

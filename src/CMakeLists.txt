@@ -283,6 +283,7 @@ if(ENABLE_GUI)
             mcp/tools_constraint.cpp
             mcp/tools_ops.cpp
             mcp/tools_view.cpp
+            mcp/tools_analysis.cpp
             render/rendercairo.cpp)
         target_include_directories(solvespace SYSTEM PRIVATE
             ${CMAKE_SOURCE_DIR}/extlib)
