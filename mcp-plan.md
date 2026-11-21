@@ -9,8 +9,8 @@ back, screenshots, camera and display control.
 ## Start here (for a fresh session)
 
 1. Read §0 (state, how to run and test) and §3 (lessons; several were bugs).
-2. Check the working tree: Milestone 1 may still be uncommitted
-   (`git status`; see "Commits so far" in §0).
+2. Check the working tree is clean (`git status`). Everything up to
+   Milestone 1 is committed (see "Commits so far" in §0).
 3. Build and run the tests (§0) to confirm the baseline: 25 MCP tests and
    SolveSpace's 300 tests should pass.
 4. The next task is **Milestone 7, selection, analysis and export** (§5). §1
@@ -118,8 +118,9 @@ The tool name is the positional parameter `_tool`, so that tools taking a
 4. `223da4ae` Milestones 5b and 6: compact results, offset/face sketches,
    `find_faces`, `constrain`, `batch`, screenshot views; view, display and
    style tools.
-5. Milestone 1: settings, configuration screen, token, clean shutdown.
-   Possibly uncommitted when this was written.
+5. `b0cd6c83` Milestone 1: settings, configuration screen, token, clean
+   shutdown.
+6. Handoff update (this file).
 
 ---
 
