@@ -380,6 +380,7 @@ MenuBarRef GetOrCreateMainMenu(bool *unique) {
     double             multiEditorWidth;
     double             multiEditorMaxHeight;
     double             multiEditorReportedHeight;
+    int                multiEditorLayoutDepth;
     double             magnificationGestureCurrentZ;
     double             rotationGestureCurrent;
     Point2d            trackpadPositionShift;
@@ -836,8 +837,9 @@ MenuBarRef GetOrCreateMainMenu(bool *unique) {
         multiEditor.verticallyResizable = YES;
         multiEditor.horizontallyResizable = NO;
         multiEditor.autoresizingMask = NSViewWidthSizable;
+        // The text wraps at a width set in layoutMultilineEditor, not the view's.
         multiEditor.textContainer.containerSize = NSMakeSize(size.width, FLT_MAX);
-        multiEditor.textContainer.widthTracksTextView = YES;
+        multiEditor.textContainer.widthTracksTextView = NO;
         multiEditor.textContainerInset = NSMakeSize(0, 1);
         multiEditor.richText = NO;
         multiEditor.importsGraphics = NO;
@@ -885,8 +887,17 @@ MenuBarRef GetOrCreateMainMenu(bool *unique) {
 
 // Sizes the multi-line editor to its text, and tells the receiver if its height or
 // text changed.
+//
+// The receiver usually moves the editor in response (the chat's footer grows
+// upwards with it), which calls this again. That nested call only moves the
+// editor and never reports, so this can't recurse further. The text's height also
+// mustn't depend on the editor's frame, or the two could keep changing each other:
+// the text wraps at a fixed width that always leaves room for a vertical scroller,
+// whether one is showing or not (it shows and hides itself, and with "always
+// show scroll bars" it takes up width).
 - (void)layoutMultilineEditor {
-    // Lay the text out at the editor's width first, then measure it.
+    multiEditorLayoutDepth++;
+
     NSRect frame = NSMakeRect(multiEditorOrigin.x, multiEditorOrigin.y,
                               multiEditorWidth, multiEditorScroll.frame.size.height);
     if(!NSEqualRects(frame, multiEditorScroll.frame)) {
@@ -895,6 +906,16 @@ MenuBarRef GetOrCreateMainMenu(bool *unique) {
     NSSize size = multiEditorScroll.contentSize;
     if(multiEditor.frame.size.width != size.width) {
         [multiEditor setFrameSize:NSMakeSize(size.width, multiEditor.frame.size.height)];
+    }
+    NSSize wrap = [NSScrollView contentSizeForFrameSize:NSMakeSize(multiEditorWidth, 100)
+                                horizontalScrollerClass:nil
+                                  verticalScrollerClass:[NSScroller class]
+                                             borderType:NSNoBorder
+                                            controlSize:NSControlSizeRegular
+                                          scrollerStyle:[NSScroller preferredScrollerStyle]];
+    double wrapWidth = std::max(10.0, (double)wrap.width);
+    if(multiEditor.textContainer.containerSize.width != wrapWidth) {
+        multiEditor.textContainer.containerSize = NSMakeSize(wrapWidth, FLT_MAX);
     }
 
     NSLayoutManager *layoutManager = multiEditor.layoutManager;
@@ -910,12 +931,15 @@ MenuBarRef GetOrCreateMainMenu(bool *unique) {
     }
     [multiEditor scrollRangeToVisible:multiEditor.selectedRange];
 
-    if(height != multiEditorReportedHeight) {
+    // Only the outermost call reports; the depth stays raised while the receiver
+    // runs, so a layout it causes is a nested one.
+    if(multiEditorLayoutDepth == 1 && height != multiEditorReportedHeight) {
         multiEditorReportedHeight = height;
         if(receiver->onEditorChanged) {
             receiver->onEditorChanged(multiEditor.string.UTF8String, height);
         }
     }
+    multiEditorLayoutDepth--;
 }
 
 - (void)textDidChange:(NSNotification *)notification {
