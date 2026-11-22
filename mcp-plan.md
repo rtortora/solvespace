@@ -13,13 +13,16 @@ back, screenshots, camera and display control.
    §0 for what is committed.
 3. Build and run the tests (§0) to confirm the baseline: 31 MCP tests and
    SolveSpace's 300 tests should pass.
-4. The next task is **Milestone 8, headless mode, CI and MCP resources**
-   (§5). §1 explains the architecture; §1.4 has the patterns for writing
-   tools.
+4. **Current focus: the in-app chat's UI** (§1.7 describes it, §5 "Chat UI"
+   lists what to do next). The user is iterating on it by hand: they run the
+   build, try it and report back; the agent changes the code, rebuilds and
+   restarts a test instance (§0, "Trying the chat UI"). Expect small,
+   user-driven steps rather than a fixed plan.
+5. After that: **Milestone 8, headless mode, CI and MCP resources** (§5).
+   §1 explains the architecture; §1.4 has the patterns for writing tools.
 
-Remaining milestone: **8** (headless/CI, MCP resources). The optional 5b/6 follow-ups in §5 are small
-and can be done any time. Milestone 1's configuration screen still needs a
-look by hand (§5).
+The optional 5b/6 follow-ups in §5 are small and can be done any time.
+Milestone 1's configuration screen still needs a look by hand (§5).
 
 ---
 
@@ -28,8 +31,9 @@ look by hand (§5).
 | | |
 |---|---|
 | Branch | `mcp-server` (from `main`; the upstream main branch is `master`) |
-| Done | Milestone 0 (vertical slice), 1 (settings, token, clean shutdown), 2–5 (documents/groups, sketching, constraints, 3D operations), 5b (modelling ergonomics), 6 (view, navigation, display, styles) and **7 (selection, picking, measurement, mesh checks, export, run_command)**. 72 tools. |
-| Not done | 8 (headless/CI; **next**) |
+| Done | Milestone 0 (vertical slice), 1 (settings, token, clean shutdown), 2–5 (documents/groups, sketching, constraints, 3D operations), 5b (modelling ergonomics), 6 (view, navigation, display, styles), 7 (selection, picking, measurement, mesh checks, export, run_command). 72 tools. **In-app chat with Claude** (§1.7): pinned multi-line input, typing while Claude replies, model chooser. |
+| In progress | The chat's UI, iterated by hand with the user (§5 "Chat UI"). |
+| Not done | 8 (headless/CI) |
 | Tests | `test/mcp/mcp_tests.py`: 31 end-to-end tests against a live GUI, all passing, including the chair as an acceptance test. SolveSpace's own suite (`cmake --build build --target test_solvespace`): 300 cases passing. |
 | Field test | Claude modelled a kitchen chair over MCP: 16 calls and three ~70-point listings. With 5b, the same chair (`test_chair_acceptance`) takes 3 calls (one `batch`, a summary, a 3-view screenshot) and ~11 KB of text results, every group at 0 DOF. |
 | Platforms | Only the macOS build has been compiled and run. The GTK, Windows and Qt changes are small and mechanical but have not been compiled. |
@@ -113,6 +117,33 @@ library. Its methods are:
 The tool name is the positional parameter `_tool`, so that tools taking a
 `name` argument still work.
 
+### Trying the chat UI
+
+The chat can't be exercised by `mcp_tests.py` (it's text-window UI driven by
+the mouse and keyboard), so it's tried by hand:
+
+* Build with `cmake --build build --target solvespace -j8`, then start a
+  test instance with `SOLVESPACE_MCP_PORT=47475
+  build/bin/SolveSpace.app/Contents/MacOS/SolveSpace &` and tell the user
+  its pid; restart it after each rebuild (`pkill -f
+  "^build/bin/SolveSpace.app/Contents/MacOS/SolveSpace"` matches only an
+  instance started with that relative path, not the user's own).
+* **The agent can see the window but not drive it.** `screencapture -x -o
+  -l <windowID> out.png` captures one window (find the ID with
+  `CGWindowListCopyWindowInfo` in a small Swift script; downscale with
+  `sips -Z 1300` before reading). Posting clicks or keys with `CGEvent`
+  needs Accessibility permission for VS Code, which wasn't granted, so the
+  user does the clicking and reports back (with a crash report if it
+  crashes; see §3 for finding the line).
+* The MCP `screenshot` tool shows only the graphics window, never the text
+  window.
+* To check how the Claude Code CLI behaves (queued messages, interrupts,
+  `set_model`), drive `claude -p --input-format stream-json
+  --output-format stream-json --verbose --tools "" --model haiku
+  --strict-mcp-config` from a short Python script (run with `CLAUDECODE`
+  cleared) and print the `result`, `system/init` and `control_response`
+  lines. That's how the facts in §1.7 were checked.
+
 ### Commits so far
 
 1. `4dc31fed` Milestone 0: HTTP server, job pump, message capture, 5 tools.
@@ -124,7 +155,13 @@ The tool name is the positional parameter `_tool`, so that tools taking a
 5. `b0cd6c83` Milestone 1: settings, configuration screen, token, clean
    shutdown.
 6. `e6b7d1f6` Handoff update.
-7. Milestone 7 (uncommitted at the time of writing).
+7. `917fc7b2` Milestone 7: selection, picking, measurement, mesh checks,
+   export, `run_command`.
+8. `10d0e855` In-app chat with Claude in the text window.
+9. `7ea6eedd` Chat input pinned to the bottom, multi-line, usable while
+   Claude replies.
+10. `dd087032` Chat model chooser; empty-chat explainer removed.
+11. Handoff update (this document).
 
 ---
 
@@ -308,7 +345,13 @@ src/solvespace.{h,cpp}          SS.mcp settings and hooks, FreezeMcpSettings,
 src/confscreen.cpp, src/ui.h    MCP section of the configuration screen
 src/platform/gui*.{cpp,mm}      Platform::SetClipboardText (all backends)
 src/mcp/chat.cpp                the in-app chat's backend (runs `claude`, see §1.7)
-src/chatscreen.cpp, src/ui.h    the text window's chat screen (Screen::CHAT)
+src/chatscreen.cpp, src/ui.h    the text window's chat screen (Screen::CHAT), its
+                                footer, input (TW.chatInput) and model chooser
+src/textwin.cpp                 the text window's pinned footer (footerRow, RowY,
+                                ScrollBottom/ScrollPage/FooterHeight)
+src/platform/gui.h, guimac.mm   multi-line editor: ShowMultilineEditor, MoveEditor,
+                                onEditorChanged (macOS NSTextView; others fall
+                                back to the single-line editor)
 CMakeLists.txt, src/CMakeLists  ENABLE_MCP option; GUI target only (not Qt or
                                 Emscripten); adds render/rendercairo.cpp for
                                 screenshots
@@ -370,6 +413,18 @@ running SolveSpace through its own MCP server.
   `SS.chat.draft` as it changes, so leaving the chat or a pending operation
   (which hide it) doesn't lose it. Other platforms fall back to the
   single-line editor, opened by clicking `>` (not compiled yet).
+* **Model.** Under the title: `model <name>  [change]`. The name is
+  `SS.chat.activeModel` (what Claude's `system/init` reports, at the start of
+  every turn) while a session runs, else `SS.chat.model` or "default".
+  **[change]** lists default / fable / opus / sonnet / haiku (aliases; the
+  CLI resolves them to the newest model) and other... (a single-line edit
+  control, `Edit::CHAT_MODEL`). The choice is saved as `ChatModel` (with the
+  MCP settings, `FreezeMcpSettings`), passed as `--model` at start, and sent
+  to a running session as `control_request {subtype: "set_model", model}`
+  (no `model` for the default). The `control_response` is matched by
+  request id: success adds a "model: ..." note; an error (e.g. "Model 'x'
+  not found"; the CLI keeps its model) is shown and the previous choice is
+  restored. The new model applies from the next message.
 * **Typing while Claude replies.** `SS.chat.pending` counts replies still to
   come. The CLI queues a message sent mid-reply and answers it as its own
   turn, with its own `result` (checked); an interrupt's response reports
@@ -377,9 +432,7 @@ running SolveSpace through its own MCP server.
   checked with a message actually queued).
 * **Not done:** Windows (the backend reports "not available"; it needs
   `CreateProcess` with pipes); Markdown rendering; approving tools other than
-  SolveSpace's. Probably: Cmd+C/V/Z in the input reach SolveSpace's menu
-  rather than the text (as in the old single-line editor); Esc in the input
-  clears the selection rather than handing the keyboard back to the model.
+  SolveSpace's. See §5 "Chat UI" for the open items.
 
 ---
 
@@ -509,6 +562,17 @@ Behaviour worth knowing:
   like the GUI does (typing 30 into a -50 dimension gives -30; give a negative
   value to flip).
 * **The client caches tool schemas.** See the reconnect note in §0.
+* **Text window `Printf` codes that take arguments.** Besides `%s %d %x %@
+  %2 %3 %# %c`, these read an argument too: `%Fp`/`%Bp` (colour from an
+  int), `%Bz` (an `RgbaColor *`), `%Lp` (link code from an int), `%D` (link
+  data), `%f`/`%h` (link functions). So `p` and `z` can't be used as literal
+  link or colour codes: `%Lp` as a link code shifted every later argument
+  and crashed in `strlen` (the chat's model chooser; now `%Lk`).
+* **Text window editors.** Each window has one native editor
+  (`ShowEditor`); `ShowEditControl` takes it from the chat's input.
+  `TW.ClearSuper()` rebuilds the whole `TextWindow` with placement new, so
+  state that must survive it lives in `SS` (e.g. `SS.chat.draft`) or is
+  carried across explicitly (`chatInput`, the CHAT screen).
 
 ---
 
@@ -572,6 +636,30 @@ Behaviour worth knowing:
 
 ## 5. Next steps (in priority order)
 
+### Chat UI (current focus; user-driven)
+
+Done and liked by the user: pinned footer, multi-line input, typing while
+Claude replies, model chooser, no explainer text. Open items, roughly in the
+order they'd matter, for the user to pick from:
+* **Cmd+C / Cmd+V / Cmd+X / Cmd+A / Cmd+Z in the input** probably fire
+  SolveSpace's menu commands (copy/paste sketch, select all, undo) rather
+  than editing the text; the old single-line editor likely had this too.
+  Fix: in `guimac.mm`, let the editor handle these key equivalents when it
+  is first responder (e.g. `performKeyEquivalent:` in the text view, or
+  have the menu items' handlers forward to the first responder).
+* **Esc in the input** goes to the graphics window's Esc handler (clears the
+  selection); handing the keyboard back to the model may be nicer.
+* **stop with a queued message:** not checked that the queued message
+  survives (the CLI's interrupt response has `still_queued`, which suggests
+  it does).
+* The transcript wraps to the width at the time it was shown; resizing the
+  window doesn't rewrap until the next change.
+* Markdown in Claude's replies is shown as plain text (`**bold**`, lists,
+  code blocks).
+* Other platforms: GTK/Qt/Windows fall back to the single-line editor,
+  opened by clicking `>`; none of this has been compiled there. The Windows
+  chat backend doesn't exist yet.
+
 ### Milestone 1 — check by hand
 
 Done (see §4); what couldn't be checked from here:
@@ -584,7 +672,7 @@ Done (see §4); what couldn't be checked from here:
   clipboard.
 * GTK3/GTK4/Windows/Qt/HTML `SetClipboardText` haven't been compiled.
 
-### Milestone 8 — Headless mode, CI and MCP resources (do this next)
+### Milestone 8 — Headless mode, CI and MCP resources (after the chat UI)
 
 * `solvespace-cli mcp [file]`: the same registry over stdio, with no window.
   Screenshots already use Cairo. The `test/` harness could then run
