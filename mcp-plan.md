@@ -345,6 +345,7 @@ src/solvespace.{h,cpp}          SS.mcp settings and hooks, FreezeMcpSettings,
 src/confscreen.cpp, src/ui.h    MCP section of the configuration screen
 src/platform/gui*.{cpp,mm}      Platform::SetClipboardText (all backends)
 src/mcp/chat.cpp                the in-app chat's backend (runs `claude`, see §1.7)
+res/mcp/chat-system-prompt.md   the chat's system prompt (a bundled resource)
 src/chatscreen.cpp, src/ui.h    the text window's chat screen (Screen::CHAT), its
                                 footer, input (TW.chatInput) and model chooser
 src/textwin.cpp                 the text window's pinned footer (footerRow, RowY,
@@ -370,11 +371,48 @@ running SolveSpace through its own MCP server.
   `--strict-mcp-config --mcp-config <temp file>` (0600, holds the token,
   deleted once Claude's `system/init` arrives), `--tools ""` (no shell or
   file tools), `--allowedTools mcp__solvespace`, `--permission-mode dontAsk`
-  and an appended system prompt about the narrow panel. The working
+  and `--system-prompt` (see "System prompt" below). The working
   directory is the open file's folder, else `$HOME` (Claude keeps its session
   history per directory). If the MCP server is off, it is started for the
   chat on `SS.mcp.port` (or one of the next 9 ports) without changing the
   saved setting.
+* **System prompt.** `res/mcp/chat-system-prompt.md` is a bundled resource
+  (listed in `res/CMakeLists.txt`) loaded with `LoadString` and passed as
+  `--system-prompt`. It **replaces** Claude Code's default prompt, which is
+  about coding with shell/file tools the chat doesn't have. Checked: the MCP
+  server's `instructions` and all tools still reach Claude with it. It was
+  written from solvespace.com's tutorials, reference, features and
+  technology pages plus the tool list, and covers modelling strategy, solver
+  and DOF behaviour, missing features and workarounds, reading screenshots,
+  units, care with the user's work, and plain-text replies. To try edits
+  without rebuilding, set `SOLVESPACE_CHAT_PROMPT=/path/to/file.md` (read
+  each time a chat starts). Note that on macOS a rebuild after changing
+  only a resource updates `build/Resources` but not the `.app`: the copy
+  into the bundle is a POST_BUILD step that runs only when the executable
+  relinks. Run `cp -r build/Resources build/bin/SolveSpace.app/Contents/`
+  (a pre-existing quirk that affects every resource). To test outside the
+  GUI, run the same flags
+  from a shell: `claude -p --strict-mcp-config --mcp-config <json>
+  --tools "" --allowedTools mcp__solvespace --permission-mode dontAsk
+  --system-prompt "$(cat res/mcp/chat-system-prompt.md)" "<request>"`.
+* **One editor, two users.** The text window's single editor serves both
+  the chat input and value edits. The text window's `onEditingDone` callback
+  sends the text to `ChatInputDone` when `chatInput.open`, and otherwise to
+  `EditControlDone`. The check used to be inside `EditControlDone`, so while
+  the chat was open, `set_parameter` (which calls `SS.TW.EditControlDone`
+  directly) sent its value into the chat input instead of setting the
+  parameter.
+* **The macOS multi-line editor's layout** (`layoutMultilineEditor`,
+  guimac.mm) reports height changes, and the chat responds by moving the
+  editor, which lays it out again. Two rules keep that from recursing:
+  - Only the outermost call reports a change.
+  - The text wraps at a fixed width that always leaves room for a vertical
+    scroller (`widthTracksTextView = NO`).
+
+  Before this, a long draft near the maximum height crashed with a stack
+  overflow. When scroll bars take up width ("always show", or with a mouse
+  connected), the auto-hiding scroller narrowed and widened the text, so its
+  measured height flipped on every pass.
 * **Finding `claude`.** GUI apps on macOS get a minimal PATH, so the user's
   shell is asked for its PATH once (`$SHELL -ilc`), plus `~/.local/bin`,
   `~/.claude/local`, `/opt/homebrew/bin`, `/usr/local/bin`.

@@ -37,17 +37,24 @@ namespace {
 
 static const int CHAT_PUMP_PERIOD_MS = 30;
 
-// Appended to Claude Code's system prompt.
-static const char *ChatSystemPrompt =
-    "You are running inside SolveSpace, the parametric 2D/3D CAD program, in "
-    "the chat panel of its property browser (the text window beside the "
-    "model). The user is looking at the SolveSpace window and talks to you "
-    "here. Use the solvespace MCP tools to inspect and change the open model; "
-    "the user sees every change live in the window, and can undo it with "
-    "Ctrl+Z. You have no shell or file tools, only SolveSpace's. Your replies "
-    "are shown as plain monospace text in a narrow panel (roughly 45 to 90 "
-    "columns), so keep them short, don't use Markdown tables, headings or "
-    "wide ASCII art, and don't repeat the tool results back to the user.";
+// The chat's system prompt. It replaces Claude Code's own (which is about
+// software engineering with shell and file tools the chat doesn't have); the
+// MCP server's instructions and tool list still reach Claude alongside it.
+// It is the resource res/mcp/chat-system-prompt.md. SOLVESPACE_CHAT_PROMPT
+// may name another file to use instead, for trying out changes without a
+// rebuild; it is read each time a chat starts.
+static std::string ChatSystemPrompt() {
+    const char *override = getenv("SOLVESPACE_CHAT_PROMPT");
+    if(override && *override) {
+        std::string text;
+        if(ReadFile(Platform::Path::From(override), &text) && !text.empty()) {
+            return text;
+        }
+        dbp("chat: couldn't read SOLVESPACE_CHAT_PROMPT=%s; using the built-in prompt",
+            override);
+    }
+    return LoadString("mcp/chat-system-prompt.md");
+}
 
 struct Session {
     enum class Kind { OUT, ERR, EXITED };
@@ -688,7 +695,8 @@ static bool Start() {
         "--tools",         "",
         "--allowedTools",  "mcp__solvespace",
         "--permission-mode", "dontAsk",
-        "--append-system-prompt", ChatSystemPrompt,
+        // Passed as an argument, not a shell string: execve takes it as is.
+        "--system-prompt", ChatSystemPrompt(),
     };
     if(!SS.chat.model.empty()) {
         params.args.push_back("--model");

@@ -279,6 +279,7 @@ add_resources(
     icons/text-window/shaded.png
     icons/text-window/workplane.png
     locales.txt
+    mcp/chat-system-prompt.md
     locales/cs_CZ.po
     locales/de_DE.po
     locales/en_US.po
