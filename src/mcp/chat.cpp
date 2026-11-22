@@ -99,6 +99,20 @@ static std::string                  readyStatus;
 // if it fails.
 static std::string                  modelRequestId;
 static std::string                  modelBefore;
+// The same for the effort level (apply_flag_settings).
+static std::string                  effortRequestId;
+static std::string                  effortBefore;
+
+// What the reply in progress is doing, shown in the footer (SS.chat.activity)
+// with the time since it started, which ticks while Claude works.
+static std::string                  phase;
+static long                         thinkingTokens = 0;     // Claude's estimate
+static std::chrono::steady_clock::time_point replyStart;
+static int                          shownSeconds = -1;
+// Whether Claude Code bills an API key (rather than a claude.ai plan), and
+// the plan's usage windows from its last rate_limit_event.
+static bool                         apiBilled = false;
+static json                         planUsage;
 
 static void AddEntry(SolveSpaceUI::ChatEntry::Kind kind, const std::string &text) {
     SS.chat.entries.push_back({ kind, text });
@@ -110,6 +124,48 @@ static void Note(const std::string &text) {
 
 static void Failure(const std::string &text) {
     AddEntry(SolveSpaceUI::ChatEntry::Kind::FAILURE, text);
+}
+
+static int ReplySeconds() {
+    using namespace std::chrono;
+    return (int)duration_cast<seconds>(steady_clock::now() - replyStart).count();
+}
+
+static void StartReply() {
+    phase          = "waiting for Claude";
+    thinkingTokens = 0;
+    replyStart     = std::chrono::steady_clock::now();
+    shownSeconds   = -1;
+}
+
+static void UpdateActivity() {
+    if(SS.chat.pending == 0) {
+        SS.chat.activity.clear();
+        return;
+    }
+    int s = ReplySeconds();
+    std::string text = phase + ssprintf(", %d:%02d", s / 60, s % 60);
+    if(phase == "thinking" && thinkingTokens > 0) {
+        text += (thinkingTokens >= 1000)
+                ? ssprintf(", ~%.1fk tokens", thinkingTokens / 1000.0)
+                : ssprintf(", ~%ld tokens", thinkingTokens);
+    }
+    SS.chat.activity = text;
+}
+
+// E.g. "plan: 18% of 5h, 3% of week", from the last rate_limit_event.
+static std::string PlanUsageText() {
+    if(!planUsage.is_object()) return "";
+    std::string text;
+    for(auto window : { std::make_pair("five_hour", "5h"), std::make_pair("seven_day", "week") }) {
+        if(!planUsage.contains(window.first)) continue;
+        const json &w = planUsage[window.first];
+        if(!w.is_object() || !w.contains("utilization") || !w["utilization"].is_number()) continue;
+        double used = w["utilization"].get<double>();
+        text += (text.empty() ? "plan: " : ", ") +
+                ssprintf("%.0f%% of %s", used * 100, window.second);
+    }
+    return text;
 }
 
 static void RemoveConfigFile() {
@@ -461,6 +517,9 @@ static void HandleMessage(const json &msg) {
         }
         // (This comes at the start of every reply, so it follows set_model.)
         if(!model.empty()) SS.chat.activeModel = model;
+        // "none" when signed in with a claude.ai plan: then the cost Claude
+        // Code reports is only an estimate, and the plan's usage says more.
+        apiBilled = (msg.value("apiKeySource", "none") != "none");
         readyStatus = (mcpStatus == "connected") ? "connected to SolveSpace"
                                                  : "SolveSpace " + mcpStatus;
         SS.chat.status = readyStatus;
@@ -468,8 +527,32 @@ static void HandleMessage(const json &msg) {
             Failure("Claude couldn't connect to SolveSpace's MCP server (" +
                     mcpStatus + "); it can't change the model.");
         }
+    } else if(type == "system" && msg.value("subtype", "") == "status") {
+        if(msg.value("status", "") == "requesting") phase = "waiting for Claude";
+    } else if(type == "system" && msg.value("subtype", "") == "thinking_tokens") {
+        phase = "thinking";
+        if(msg.contains("estimated_tokens") && msg["estimated_tokens"].is_number()) {
+            thinkingTokens = msg["estimated_tokens"].get<long>();
+        }
+    } else if(type == "rate_limit_event" && msg.contains("rate_limit_info")) {
+        const json &info = msg["rate_limit_info"];
+        if(info.is_object() && info.contains("unifiedWindows")) {
+            planUsage = info["unifiedWindows"];
+        }
     } else if(type == "control_response" && msg.contains("response")) {
         const json &response = msg["response"];
+        if(!effortRequestId.empty() && response.value("request_id", "") == effortRequestId) {
+            effortRequestId.clear();
+            if(response.value("subtype", "") == "success") {
+                Note("effort: " + (SS.chat.effort.empty() ? std::string("default")
+                                                          : SS.chat.effort));
+            } else {
+                Failure("Couldn't change the effort to " + SS.chat.effort + ": " +
+                        response.value("error", "unknown error"));
+                SS.chat.effort = effortBefore;
+                SS.FreezeMcpSettings();
+            }
+        }
         if(!modelRequestId.empty() && response.value("request_id", "") == modelRequestId) {
             modelRequestId.clear();
             std::string model = response.contains("response") && response["response"].is_object()
@@ -497,6 +580,18 @@ static void HandleMessage(const json &msg) {
             streamingEntry = -1;
         } else if(eventType == "content_block_start") {
             streamingEntry = -1;
+            const json &block = event.contains("content_block") ? event["content_block"]
+                                                                : json::object();
+            std::string blockType = block.is_object() ? block.value("type", "") : "";
+            if(blockType == "thinking" || blockType == "redacted_thinking") {
+                phase = "thinking";
+                thinkingTokens = 0;
+            } else if(blockType == "tool_use") {
+                // Claude is writing the call's arguments (a batch can be long).
+                phase = "preparing " + ToolName(block.value("name", ""));
+            } else if(blockType == "text") {
+                phase = "writing";
+            }
         } else if(eventType == "content_block_delta" && event.contains("delta")) {
             const json &delta = event["delta"];
             if(delta.value("type", "") == "text_delta") {
@@ -529,6 +624,9 @@ static void HandleMessage(const json &msg) {
                     args = " " + input.dump();
                 }
                 AddEntry(Kind::TOOL, Shorten(name + args, 100));
+                // SolveSpace runs it now (on this thread, so the footer only
+                // shows this if the call is still queued behind a dialog).
+                phase = "running " + name;
             } else if(blockType == "text" && !sawTextDelta) {
                 // Not streamed (no partial messages): the whole text at once.
                 AddEntry(Kind::CLAUDE, block.value("text", ""));
@@ -538,6 +636,9 @@ static void HandleMessage(const json &msg) {
         const json &content = msg["message"].value("content", json::array());
         if(content.is_array()) {
             for(const json &block : content) {
+                if(block.value("type", "") == "tool_result") {
+                    phase = "waiting for Claude";
+                }
                 if(block.value("type", "") == "tool_result" &&
                    block.value("is_error", false)) {
                     std::string text = block.contains("content")
@@ -549,6 +650,8 @@ static void HandleMessage(const json &msg) {
     } else if(type == "result") {
         // One for each message sent (Claude answers queued ones in turn).
         SS.chat.pending = std::max(0, SS.chat.pending - 1);
+        // A queued message is answered next.
+        if(SS.chat.pending > 0) StartReply();
         if(!readyStatus.empty()) SS.chat.status = readyStatus;
         streamingEntry = -1;
         std::string subtype = msg.value("subtype", "");
@@ -566,7 +669,14 @@ static void HandleMessage(const json &msg) {
             double ms = msg.value("duration_ms", 0.0);
             double cost = msg.value("total_cost_usd", 0.0);
             std::string note = ssprintf("%.1f s", ms / 1000.0);
-            if(cost > 0) note += ssprintf(", $%.3f", cost);
+            // With an API key the cost is real; on a claude.ai plan it's only
+            // an estimate, and the share of the plan's limits used says more.
+            std::string plan = PlanUsageText();
+            if(apiBilled) {
+                if(cost > 0) note += ssprintf(", $%.3f", cost);
+            } else if(!plan.empty()) {
+                note += ", " + plan;
+            }
             Note(note);
         }
         interrupted = false;
@@ -620,7 +730,15 @@ static void Pump() {
         if(!session) break;
     }
 
-    if(changed) ShowChanges();
+    // The footer's clock ticks once a second while Claude works.
+    if(SS.chat.pending > 0 && ReplySeconds() != shownSeconds) {
+        shownSeconds = ReplySeconds();
+        changed = true;
+    }
+    if(changed) {
+        UpdateActivity();
+        ShowChanges();
+    }
     if(session) pumpTimer->RunAfter(CHAT_PUMP_PERIOD_MS);
 }
 
@@ -702,6 +820,10 @@ static bool Start() {
         params.args.push_back("--model");
         params.args.push_back(SS.chat.model);
     }
+    if(!SS.chat.effort.empty()) {
+        params.args.push_back("--effort");
+        params.args.push_back(SS.chat.effort);
+    }
     // Claude Code keeps its session history per directory: use the open
     // file's, else the home directory.
     if(!SS.saveFile.IsEmpty()) {
@@ -740,7 +862,9 @@ static void Send(const std::string &text) {
         { "message", { { "role", "user" }, { "content", text } } },
     };
     WriteLine(session, msg.dump() + "\n");
+    if(SS.chat.pending == 0) StartReply();
     SS.chat.pending++;
+    UpdateActivity();
     ShowChanges();
 }
 
@@ -754,6 +878,8 @@ static void Interrupt() {
     };
     WriteLine(session, msg.dump() + "\n");
     SS.chat.status = "stopping...";
+    phase = "stopping";
+    UpdateActivity();
     ShowChanges();
 }
 
@@ -779,6 +905,29 @@ static void SetModel(const std::string &model) {
     ShowChanges();
 }
 
+// Changes the effort for the rest of the session, as SetModel does the model.
+// (Claude Code has no request for just that; apply_flag_settings sets the
+// same setting as --effort.)
+static void SetEffort(const std::string &effort) {
+    if(effort == SS.chat.effort && effortRequestId.empty()) return;
+    std::string before = SS.chat.effort;
+    SS.chat.effort = effort;
+    SS.FreezeMcpSettings();
+
+    if(session && !effort.empty()) {
+        if(effortRequestId.empty()) effortBefore = before;
+        effortRequestId = ssprintf("solvespace_%d", ++requestCount);
+        json msg = {
+            { "type", "control_request" },
+            { "request_id", effortRequestId },
+            { "request", { { "subtype", "apply_flag_settings" },
+                           { "settings", { { "effortLevel", effort } } } } },
+        };
+        WriteLine(session, msg.dump() + "\n");
+    }
+    ShowChanges();
+}
+
 static void EndSession() {
     if(session) {
         StopSession(session);
@@ -787,6 +936,7 @@ static void EndSession() {
     RemoveConfigFile();
     SS.chat.running = false;
     SS.chat.pending = 0;
+    SS.chat.activity.clear();
     streamingEntry  = -1;
 }
 
@@ -810,6 +960,7 @@ void SetupChat() {
     SS.chat.send      = Send;
     SS.chat.interrupt = Interrupt;
     SS.chat.setModel  = SetModel;
+    SS.chat.setEffort = SetEffort;
     SS.chat.reset     = Reset;
     SS.chat.shutdown  = EndSession;
 }

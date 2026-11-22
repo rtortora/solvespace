@@ -395,6 +395,25 @@ running SolveSpace through its own MCP server.
   from a shell: `claude -p --strict-mcp-config --mcp-config <json>
   --tools "" --allowedTools mcp__solvespace --permission-mode dontAsk
   --system-prompt "$(cat res/mcp/chat-system-prompt.md)" "<request>"`.
+* **Model, effort and progress.** The defaults are `sonnet` with `medium`
+  effort (settings `ChatModel` and `ChatEffort`, passed as `--model` and
+  `--effort`). A saved setting wins over the default.
+  - Effort changes mid-session with the control request
+    `apply_flag_settings {settings: {effortLevel}}`. There is no
+    `set_effort`. A test showed it takes effect: thinking went from 0 to 249
+    tokens after switching from low to max.
+  - The footer shows the reply's phase and a clock that ticks each second,
+    e.g. "thinking, 2:41, ~16.2k tokens". It comes from these stream
+    messages: `system/status: requesting`, `content_block_start` (thinking,
+    tool_use, text), `system/thinking_tokens` (estimated_tokens), tool calls
+    and tool results.
+  - The note after a reply shows the plan's usage from `rate_limit_event`
+    (five_hour, seven_day). The dollar cost appears only when `system/init`
+    has an `apiKeySource` other than "none", i.e. API billing; on a
+    claude.ai plan it is only an estimate.
+  - Why this matters: a hard request on Opus once spent 3.5 minutes and about
+    20k thinking tokens before its first tool call, while the footer only
+    said "working...".
 * **One editor, two users.** The text window's single editor serves both
   the chat input and value edits. The text window's `onEditingDone` callback
   sends the text to `ChatInputDone` when `chatInput.open`, and otherwise to

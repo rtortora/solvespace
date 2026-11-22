@@ -72,7 +72,8 @@ void SolveSpaceUI::Init() {
     mcp.port    = (int)settings->ThawInt("McpPort", 47474);
     if(mcp.port < 1 || mcp.port > 65535) mcp.port = 47474;
     mcp.token   = settings->ThawString("McpToken", "");
-    chat.model  = settings->ThawString("ChatModel", "");
+    chat.model  = settings->ThawString("ChatModel", "sonnet");
+    chat.effort = settings->ThawString("ChatEffort", "medium");
     // Grid spacing
     gridSpacing = settings->ThawFloat("GridSpacing", 5.0);
     // Export scale factor
@@ -350,6 +351,7 @@ void SolveSpaceUI::FreezeMcpSettings() {
     settings->FreezeInt("McpPort", (uint32_t)mcp.port);
     settings->FreezeString("McpToken", mcp.token);
     settings->FreezeString("ChatModel", chat.model);
+    settings->FreezeString("ChatEffort", chat.effort);
 }
 
 void SolveSpaceUI::Refresh() {

@@ -681,12 +681,18 @@ public:
         // Claude and answered after it.
         int         pending;
         std::string draft;          // what the user is writing
-        // The model asked for: an alias ("opus") or a name, or empty for
+        // The model asked for: an alias ("sonnet") or a name, or empty for
         // Claude Code's default; saved in the settings. And the one in use,
         // as Claude reports it (empty until it starts).
         std::string model;
         std::string activeModel;
-        std::string status;         // e.g. "claude-opus-5-5, solvespace connected"
+        // The effort level (low, medium, high, xhigh, max), or empty for
+        // Claude Code's default; saved in the settings.
+        std::string effort;
+        std::string status;         // e.g. "connected to SolveSpace"
+        // What the reply in progress is doing, for the footer, e.g.
+        // "thinking, 2:41, ~16k tokens"; empty when no reply is in progress.
+        std::string activity;
 
         // Sends a message, starting Claude (and the MCP server) if needed.
         std::function<void(const std::string &)> send;
@@ -695,6 +701,8 @@ public:
         // Picks the model (see `model`): for the session if it's running,
         // and for the next ones.
         std::function<void(const std::string &)> setModel;
+        // Picks the effort level (see `effort`), in the same way.
+        std::function<void(const std::string &)> setEffort;
         // Ends the session and clears the transcript.
         std::function<void()>       reset;
         // Ends the session; called on exit.

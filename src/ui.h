@@ -455,6 +455,7 @@ public:
     void ShowChatFooter();
     // The chat shows the models to choose from.
     bool chatChoosingModel = false;
+    bool chatChoosingEffort = false;
     // The chat's input: a multi-line editor in the footer, left open while
     // the chat is shown (HideEditControl() leaves it alone), so that the user
     // can write while Claude replies and while working in the graphics window.
@@ -566,6 +567,7 @@ public:
     static void ScreenShowChat(int link, uint32_t v);
     static void ScreenChatAction(int link, uint32_t v);
     static void ScreenChatModel(int link, uint32_t v);
+    static void ScreenChatEffort(int link, uint32_t v);
 
     // These ones do stuff with the edit control
     static void ScreenChangeExprA(int link, uint32_t v);

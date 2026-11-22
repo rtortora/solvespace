@@ -53,6 +53,25 @@ void TextWindow::ScreenChatModel(int link, uint32_t v) {
     }
 }
 
+// Claude Code's effort levels: how much Claude thinks before it acts. Lower is
+// faster, higher helps with hard design problems.
+static const char *ChatEffortChoices[] = { "low", "medium", "high", "xhigh", "max" };
+
+void TextWindow::ScreenChatEffort(int link, uint32_t v) {
+    switch(link) {
+        case 'c':   // [change]
+            SS.TW.chatChoosingEffort = !SS.TW.chatChoosingEffort;
+            break;
+        case 'k':   // one of the choices
+            if(v < sizeof(ChatEffortChoices) / sizeof(ChatEffortChoices[0]) &&
+               SS.chat.setEffort) {
+                SS.chat.setEffort(ChatEffortChoices[v]);
+            }
+            SS.TW.chatChoosingEffort = false;
+            break;
+    }
+}
+
 // Splits UTF-8 text into lines of at most `width` characters, at spaces
 // where possible.
 static void WrapText(const std::string &text, int width, std::vector<std::string> *lines) {
@@ -175,6 +194,21 @@ void TextWindow::ShowChat() {
         }
     }
 
+    std::string effort = SS.chat.effort.empty() ? "default" : SS.chat.effort;
+    Printf(false, " %Fgeffort%E %Fi%s%E  %Fl%Lc%f[%s]%E", effort.c_str(),
+           &ScreenChatEffort, chatChoosingEffort ? "close" : "change");
+    if(chatChoosingEffort) {
+        Printf(false, "%Fg   lower is faster; it's used from the next message%E");
+        for(uint32_t i = 0; i < sizeof(ChatEffortChoices) / sizeof(ChatEffortChoices[0]); i++) {
+            if(SS.chat.effort == ChatEffortChoices[i]) {
+                Printf(false, "   %Fs" RADIO_TRUE " %s%E", ChatEffortChoices[i]);
+            } else {
+                Printf(false, "   %Fl%Lk%D%f" RADIO_FALSE " %s%E", i, &ScreenChatEffort,
+                       ChatEffortChoices[i]);
+            }
+        }
+    }
+
     struct Line {
         char        color;
         const char *gutter;
@@ -239,7 +273,9 @@ void TextWindow::ShowChatFooter() {
     if(SS.chat.pending > 0) {
         std::string queued = (SS.chat.pending > 1)
                              ? ssprintf(" (%d more queued)", SS.chat.pending - 1) : "";
-        Printf(false, "%Fg   working...%s%E  %Fl%Ls%f[stop]%E", queued.c_str(),
+        // E.g. "thinking, 2:41, ~16.2k tokens".
+        std::string activity = SS.chat.activity.empty() ? "working..." : SS.chat.activity;
+        Printf(false, "%Fg   %s%s%E  %Fl%Ls%f[stop]%E", activity.c_str(), queued.c_str(),
                &ScreenChatAction);
     } else {
         Printf(false, "%Fg   Enter sends, Shift+Enter starts a new line%E");
