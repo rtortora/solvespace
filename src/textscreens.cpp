@@ -1112,10 +1112,8 @@ void TextWindow::ShowTangentArc() {
 // The edit control is visible, and the user just pressed enter.
 //-----------------------------------------------------------------------------
 void TextWindow::EditControlDone(std::string s) {
-    if(chatInput.open) {
-        ChatInputDone(s);
-        return;
-    }
+    // (The chat's input also uses the window's editor; onEditingDone sends
+    // its text to ChatInputDone() instead.)
     edit.showAgain = false;
 
     switch(edit.meaning) {

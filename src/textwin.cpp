@@ -281,7 +281,16 @@ void TextWindow::Init() {
             // Only Qt lets the user move the docked window with the toolkit's own controls
             // (dragging), so it is the only platform that calls this, to update the menu.
             window->onDockSideChanged = std::bind(&GraphicsWindow::EnsureValidActives, &SS.GW);
-            window->onEditingDone = std::bind(&TextWindow::EditControlDone, this, _1);
+            // The window has one editor, used either by the chat's input or to
+            // edit a value. Decide which here, not in EditControlDone(): MCP
+            // tools call that directly to set a value while the chat is open.
+            window->onEditingDone = [this](std::string s) {
+                if(chatInput.open) {
+                    ChatInputDone(s);
+                } else {
+                    EditControlDone(s);
+                }
+            };
             window->onEditorChanged = std::bind(&TextWindow::ChatInputChanged, this, _1, _2);
             window->onScrollbarAdjusted = std::bind(&TextWindow::ScrollbarEvent, this, _1);
             window->SetMinContentSize(370, 370);
