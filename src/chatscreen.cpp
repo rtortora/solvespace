@@ -30,6 +30,29 @@ void TextWindow::ScreenChatAction(int link, uint32_t v) {
     }
 }
 
+// The aliases offered (Claude Code resolves them to the newest model of
+// each family); index 0 is Claude Code's default.
+static const char *ChatModelChoices[] = { "", "fable", "opus", "sonnet", "haiku" };
+
+void TextWindow::ScreenChatModel(int link, uint32_t v) {
+    switch(link) {
+        case 'c':   // [change]
+            SS.TW.chatChoosingModel = !SS.TW.chatChoosingModel;
+            break;
+        case 'k':   // one of the choices
+            if(v < sizeof(ChatModelChoices) / sizeof(ChatModelChoices[0]) &&
+               SS.chat.setModel) {
+                SS.chat.setModel(ChatModelChoices[v]);
+            }
+            SS.TW.chatChoosingModel = false;
+            break;
+        case 'o':   // other...: type a name
+            SS.TW.edit.meaning = Edit::CHAT_MODEL;
+            SS.TW.ShowEditControl(3, SS.chat.model);
+            break;
+    }
+}
+
 // Splits UTF-8 text into lines of at most `width` characters, at spaces
 // where possible.
 static void WrapText(const std::string &text, int width, std::vector<std::string> *lines) {
@@ -126,6 +149,32 @@ void TextWindow::ShowChat() {
         for(const std::string &l : status) Printf(false, " %Fg%s%E", l.c_str());
     }
 
+    // The model: the one in use, else the one asked for.
+    std::string model = SS.chat.running ? SS.chat.activeModel : "";
+    if(model.empty()) model = SS.chat.model.empty() ? "default" : SS.chat.model;
+    Printf(false, " %Fgmodel%E %Fi%s%E  %Fl%Lc%f[%s]%E", model.c_str(),
+           &ScreenChatModel, chatChoosingModel ? "close" : "change");
+    if(chatChoosingModel) {
+        Printf(false, "%Fg   pick one; it's used from the next message%E");
+        for(uint32_t i = 0; i < sizeof(ChatModelChoices) / sizeof(ChatModelChoices[0]); i++) {
+            const char *name = ChatModelChoices[i][0] ? ChatModelChoices[i] : "default";
+            bool chosen = (SS.chat.model == ChatModelChoices[i]);
+            if(chosen) {
+                Printf(false, "   %Fs" RADIO_TRUE " %s%E", name);
+            } else {
+                Printf(false, "   %Fl%Lk%D%f" RADIO_FALSE " %s%E", i, &ScreenChatModel, name);
+            }
+        }
+        bool other = true;
+        for(const char *c : ChatModelChoices) if(SS.chat.model == c) other = false;
+        if(other) {
+            Printf(false, "   %Fs" RADIO_TRUE " %s%E  %Fl%Lo%f[edit]%E", SS.chat.model.c_str(),
+                   &ScreenChatModel);
+        } else {
+            Printf(false, "   %Fl%Lo%f" RADIO_FALSE " other...%E", &ScreenChatModel);
+        }
+    }
+
     struct Line {
         char        color;
         const char *gutter;
@@ -133,16 +182,6 @@ void TextWindow::ShowChat() {
     };
     std::vector<Line> lines;
     std::vector<std::string> wrapped;
-
-    if(SS.chat.entries.empty()) {
-        WrapText("Ask Claude to build, change or explain the model. It works "
-                 "through SolveSpace's MCP server and can only use SolveSpace's "
-                 "tools; you see every change in the window, and Ctrl+Z undoes it. "
-                 "Needs Claude Code (the `claude` command), signed in.",
-                 wrapWidth, &wrapped);
-        lines.push_back({ 'd', "", "" });
-        for(std::string &l : wrapped) lines.push_back({ 'g', "", l });
-    }
 
     Kind prev = Kind::NOTE;
     bool first = true;

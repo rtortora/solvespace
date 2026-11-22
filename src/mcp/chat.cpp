@@ -88,6 +88,10 @@ static int                          requestCount = 0;
 static std::deque<std::string>      stderrTail;
 // The status to show between replies, e.g. "claude-opus-5-5, connected ...".
 static std::string                  readyStatus;
+// The set_model request waiting for its answer, and the model to go back to
+// if it fails.
+static std::string                  modelRequestId;
+static std::string                  modelBefore;
 
 static void AddEntry(SolveSpaceUI::ChatEntry::Kind kind, const std::string &text) {
     SS.chat.entries.push_back({ kind, text });
@@ -336,7 +340,9 @@ static void RunSession(std::shared_ptr<Session> s, LaunchParams params) {
     std::string how;
     if(WIFEXITED(status)) {
         int code = WEXITSTATUS(status);
-        how = (code == 127) ? "Couldn't run " + program + "."
+        how = (code == 127) ? "Couldn't run " + program + ". The chat needs Claude Code "
+                              "(the `claude` command), installed and signed in; "
+                              "SOLVESPACE_CLAUDE can give its path."
                             : ssprintf("Claude exited with status %d.", code);
     } else if(WIFSIGNALED(status)) {
         how = ssprintf("Claude was stopped by signal %d.", WTERMSIG(status));
@@ -446,12 +452,35 @@ static void HandleMessage(const json &msg) {
                 }
             }
         }
-        readyStatus = model + (mcpStatus == "connected" ? ", connected to SolveSpace"
-                                                        : ", SolveSpace " + mcpStatus);
+        // (This comes at the start of every reply, so it follows set_model.)
+        if(!model.empty()) SS.chat.activeModel = model;
+        readyStatus = (mcpStatus == "connected") ? "connected to SolveSpace"
+                                                 : "SolveSpace " + mcpStatus;
         SS.chat.status = readyStatus;
         if(mcpStatus != "connected") {
             Failure("Claude couldn't connect to SolveSpace's MCP server (" +
                     mcpStatus + "); it can't change the model.");
+        }
+    } else if(type == "control_response" && msg.contains("response")) {
+        const json &response = msg["response"];
+        if(!modelRequestId.empty() && response.value("request_id", "") == modelRequestId) {
+            modelRequestId.clear();
+            std::string model = response.contains("response") && response["response"].is_object()
+                                ? response["response"].value("model", "")
+                                : response.value("model", "");
+            if(response.value("subtype", "") == "success") {
+                if(!model.empty()) {
+                    SS.chat.activeModel = model;
+                    Note("model: " + model);
+                }
+            } else {
+                Failure("Couldn't switch the model to " +
+                        (SS.chat.model.empty() ? std::string("the default") : SS.chat.model) +
+                        ": " + response.value("error", "unknown error"));
+                SS.chat.model = modelBefore;
+                SS.FreezeMcpSettings();
+                if(!model.empty()) SS.chat.activeModel = model;
+            }
         }
     } else if(type == "stream_event" && msg.contains("event")) {
         const json &event = msg["event"];
@@ -661,6 +690,10 @@ static bool Start() {
         "--permission-mode", "dontAsk",
         "--append-system-prompt", ChatSystemPrompt,
     };
+    if(!SS.chat.model.empty()) {
+        params.args.push_back("--model");
+        params.args.push_back(SS.chat.model);
+    }
     // Claude Code keeps its session history per directory: use the open
     // file's, else the home directory.
     if(!SS.saveFile.IsEmpty()) {
@@ -673,6 +706,8 @@ static bool Start() {
     session = std::make_shared<Session>();
     stderrTail.clear();
     readyStatus.clear();
+    modelRequestId.clear();
+    SS.chat.activeModel.clear();
     streamingEntry = -1;
     interrupted = false;
     SS.chat.running = true;
@@ -714,6 +749,28 @@ static void Interrupt() {
     ShowChanges();
 }
 
+static void SetModel(const std::string &model) {
+    if(model == SS.chat.model && modelRequestId.empty()) return;
+    std::string before = SS.chat.model;
+    SS.chat.model = model;
+    SS.FreezeMcpSettings();
+
+    if(session) {
+        // For the rest of the session; Claude says which model that is.
+        json request = { { "subtype", "set_model" } };
+        if(!model.empty()) request["model"] = model;   // none: the default
+        if(modelRequestId.empty()) modelBefore = before;
+        modelRequestId = ssprintf("solvespace_%d", ++requestCount);
+        json msg = {
+            { "type", "control_request" },
+            { "request_id", modelRequestId },
+            { "request", request },
+        };
+        WriteLine(session, msg.dump() + "\n");
+    }
+    ShowChanges();
+}
+
 static void EndSession() {
     if(session) {
         StopSession(session);
@@ -744,6 +801,7 @@ void SetupChat() {
 
     SS.chat.send      = Send;
     SS.chat.interrupt = Interrupt;
+    SS.chat.setModel  = SetModel;
     SS.chat.reset     = Reset;
     SS.chat.shutdown  = EndSession;
 }

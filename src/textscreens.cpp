@@ -1320,6 +1320,16 @@ void TextWindow::EditControlDone(std::string s) {
             stepDim.steps = min(300, max(1, atoi(s.c_str())));
             break;
 
+        case Edit::CHAT_MODEL: {
+            size_t first = s.find_first_not_of(" \t");
+            size_t last  = s.find_last_not_of(" \t");
+            std::string model = (first == std::string::npos)
+                                ? "" : s.substr(first, last - first + 1);
+            if(SS.chat.setModel) SS.chat.setModel(model);
+            chatChoosingModel = false;
+            break;
+        }
+
         case Edit::TANGENT_ARC_RADIUS:
             if(Expr *e = Expr::From(s, /*popUpError=*/true)) {
                 if(e->Eval() < LENGTH_EPS) {

@@ -403,7 +403,9 @@ public:
         // For named parameters
         PARAM_NAME            = 810,
         PARAM_VALUE           = 811,
-        LINK_PARAM_VALUE      = 812
+        LINK_PARAM_VALUE      = 812,
+        // For the chat with Claude
+        CHAT_MODEL            = 900
     };
     struct {
         bool        showAgain;
@@ -451,6 +453,8 @@ public:
     void ShowTangentArc();
     void ShowChat();
     void ShowChatFooter();
+    // The chat shows the models to choose from.
+    bool chatChoosingModel = false;
     // The chat's input: a multi-line editor in the footer, left open while
     // the chat is shown (HideEditControl() leaves it alone), so that the user
     // can write while Claude replies and while working in the graphics window.
@@ -561,6 +565,7 @@ public:
     static void ScreenHome(int link, uint32_t v);
     static void ScreenShowChat(int link, uint32_t v);
     static void ScreenChatAction(int link, uint32_t v);
+    static void ScreenChatModel(int link, uint32_t v);
 
     // These ones do stuff with the edit control
     static void ScreenChangeExprA(int link, uint32_t v);

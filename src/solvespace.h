@@ -681,12 +681,20 @@ public:
         // Claude and answered after it.
         int         pending;
         std::string draft;          // what the user is writing
+        // The model asked for: an alias ("opus") or a name, or empty for
+        // Claude Code's default; saved in the settings. And the one in use,
+        // as Claude reports it (empty until it starts).
+        std::string model;
+        std::string activeModel;
         std::string status;         // e.g. "claude-opus-5-5, solvespace connected"
 
         // Sends a message, starting Claude (and the MCP server) if needed.
         std::function<void(const std::string &)> send;
         // Stops the reply in progress.
         std::function<void()>       interrupt;
+        // Picks the model (see `model`): for the session if it's running,
+        // and for the next ones.
+        std::function<void(const std::string &)> setModel;
         // Ends the session and clears the transcript.
         std::function<void()>       reset;
         // Ends the session; called on exit.
